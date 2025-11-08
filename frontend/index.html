@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TradingView Dashboard</title>
+
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <style>
+      body {
+        background-color: #0D1117;
+        color: #E5E7EB;
+        font-family: 'Inter', sans-serif;
+      }
+
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      ::-webkit-scrollbar-track {
+        background: #1F2937;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #4B5563;
+        border-radius: 4px;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: #6B7280;
+      }
+
+      #root {
+        display: flex;
+        min-height: 100vh;
+        width: 100%;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <!-- فقط همین یکی باید باشه -->
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

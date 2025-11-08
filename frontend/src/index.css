@@ -1,0 +1,98 @@
+  /* src/index.css - Fixed for full-screen application layout */
+
+  /* Remove default styles that center content and constrain width/height */
+  :root {
+    font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+    line-height: 1.5;
+    font-weight: 400;
+
+    color-scheme: light dark;
+    color: rgba(255, 255, 255, 0.87);
+    background-color: #0a0e12; /* Set a consistent background color */
+
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Ensure the body takes full viewport size and removes margins */
+  body {
+    margin: 0;
+    min-width: 100vw;
+    min-height: 100vh;
+    /* Remove place-items: center; and display: flex; from body to allow full-screen layout */
+  }
+
+  /* Ensure the root element takes full viewport size */
+  #root {
+    width: 100vw;
+    height: 100vh;
+    margin: 0;
+    padding: 0;
+    /* Remove max-width and padding from the previous App.css settings */
+  }
+
+  /* Reset default button styles for consistency */
+  button {
+    border-radius: 8px;
+    border: 1px solid transparent;
+    padding: 0.6em 1.2em;
+    font-size: 1em;
+    font-weight: 500;
+    font-family: inherit;
+    background-color: #1a1a1a;
+    cursor: pointer;
+    transition: border-color 0.25s;
+  }
+  button:hover {
+    border-color: #646cff;
+  }
+  button:focus,
+  button:focus-visible {
+    outline: 4px auto -webkit-focus-ring-color;
+  }
+
+  @keyframes fadeInSlow {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideInLeft {
+  from { opacity: 0; transform: translateX(-40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(40px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
+.animate-fadeInSlow { animation: fadeInSlow 1.2s ease forwards; }
+.animate-slideInLeft { animation: slideInLeft 0.8s ease forwards; }
+.animate-slideInRight { animation: slideInRight 0.8s ease forwards; }
+.animate-pulse-slow { animation: pulse-slow 6s ease-in-out infinite; }
+
+.indicator-panel {
+  width: 100%;
+  margin-top: 8px;
+  border: 1px solid #262b33;
+  border-radius: 8px;
+  background-color: #0b0f14;
+  position: relative;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+#rsi-chart-container {
+  height: 150px;
+}
+
+#macd-chart-container {
+  height: 180px;
+}
