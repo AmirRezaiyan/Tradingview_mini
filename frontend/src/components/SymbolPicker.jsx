@@ -1,4 +1,3 @@
-// src/components/SymbolPicker.jsx
 import React, { useEffect, useState, useRef } from "react";
 import { FaTimes, FaSearch, FaStar, FaRegStar } from "react-icons/fa";
 import axios from "axios";

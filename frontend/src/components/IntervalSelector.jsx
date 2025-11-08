@@ -1,4 +1,3 @@
-// src/components/IntervalSelector.jsx
 import React from "react";
 
 const OPTIONS = [

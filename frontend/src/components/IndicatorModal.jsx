@@ -1,5 +1,3 @@
-// frontend/src/components/ChartToolbar.jsx
-
 import React, { useState } from "react";
 import {
   FaChartLine,
@@ -33,7 +31,6 @@ export default function ChartToolbar({ onShowIndicators }) {
       setActiveTool(toolId);
     }
 
-    // ارسال event به ChartContainer
     const detail = { tool: toolId === "eraser" ? "eraser" : toolId };
     const eventNames = [
       "tvmini:tool:selected",

@@ -1,4 +1,3 @@
-// src/components/TradingChartApp.jsx
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import { FaChartLine, FaRuler, FaArrowsAltH, FaDraftingCompass, FaSquare, FaEraser, FaMagic, FaTimes, FaSearch } from "react-icons/fa";
 

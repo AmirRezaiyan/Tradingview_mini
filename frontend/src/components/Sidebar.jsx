@@ -1,6 +1,4 @@
-// src/components/Sidebar.jsx
 import React, { useEffect, useState } from "react";
-
 const LS_KEY = "tvmini:favorites_v1";
 const DEBUG = false;
 

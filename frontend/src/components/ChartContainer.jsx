@@ -1,9 +1,8 @@
-// frontend/src/components/ChartContainer.jsx
 import React, { useEffect, useRef, useState } from "react";
 import { createChart } from "lightweight-charts";
 import api from "../api/api";
 import ChartToolbar from "./ChartToolbar";
-// import IndicatorModal from "./IndicatorModal"; // اگر فایل جداگانه دارید این خط رو uncomment کنید
+// import IndicatorModal from "./IndicatorModal";
 import {
   calculateSMA,
   calculateEMA,
@@ -72,7 +71,6 @@ function IndicatorModal({ isOpen, onClose }) {
   }, [search]);
 
 
-  // ...existing code...
   useEffect(() => {
     return () => {
       // unsubscribe timeScale visible-range listener if present
@@ -108,7 +106,6 @@ function IndicatorModal({ isOpen, onClose }) {
       } catch (e) { /* ignore */ }
     };
   }, []);
-  // ...existing code...
 
   useEffect(() => {
     if (!isOpen) setSearch("");
@@ -1177,7 +1174,6 @@ export default function ChartContainer({
   };
 
 
-  // ...existing code...
   // تابع حذف اندیکاتور
   const removeIndicator = (indicatorId) => {
     console.log("🗑️ Removing indicator:", indicatorId);
@@ -1251,7 +1247,6 @@ export default function ChartContainer({
       }, 60);
     } catch (e) { /* ignore */ }
   };
-  // ...existing code...
 
 
   // -----------------------------
@@ -2314,10 +2309,6 @@ export default function ChartContainer({
   // -----------------------------------------------------------------------
   // Render
   // -----------------------------------------------------------------------
-// ...existing code...
-  // -----------------------------------------------------------------------
-  // Render
-  // -----------------------------------------------------------------------
   return (
     <div
       className={`flex-1 flex flex-col h-full border border-gray-800 bg-[#0b0f14] rounded-lg overflow-hidden transition-opacity duration-300 ${fade ? "opacity-40" : "opacity-100"
@@ -2469,9 +2460,7 @@ export default function ChartContainer({
           </svg>
         </div>
 
-        {/* پنل‌های اندیکاتور (RSI و MACD) به صورت خودکار اینجا اضافه می‌شن */}
       </div>
     </div>
   );
 }
-// ...existing code...

@@ -1,4 +1,3 @@
-// src/components/NotesPanel.jsx
 import React, { useEffect, useState } from "react";
 import api from "../api/api";
 
@@ -10,7 +9,6 @@ export default function NotesPanel({ symbol, activeSymbol }) {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // ✅ فقط نوت‌های symbol فعلی را لود کن
   useEffect(() => {
     let cancelled = false;
 
@@ -21,10 +19,8 @@ export default function NotesPanel({ symbol, activeSymbol }) {
       }
       setLoading(true);
       try {
-        // درخواست فقط برای symbol فعلی
         const res = await api.listNotes(currentSymbol);
         if (!cancelled) {
-          // فیلتر محض اطمینان، اگر بک‌اند تمام نوت‌ها را برمی‌گرداند
           const filtered = Array.isArray(res.data)
             ? res.data.filter((n) => n.symbol === currentSymbol)
             : [];
@@ -44,7 +40,6 @@ export default function NotesPanel({ symbol, activeSymbol }) {
     };
   }, [currentSymbol]);
 
-  // ✅ افزودن نوت مخصوص symbol فعلی
   const handleAdd = async () => {
     if (!currentSymbol) return;
     const content = text.trim();
@@ -69,7 +64,6 @@ export default function NotesPanel({ symbol, activeSymbol }) {
     }
   };
 
-  // ✅ حذف نوت از همان symbol
   const handleDelete = async (id) => {
     try {
       await api.deleteNote(id);

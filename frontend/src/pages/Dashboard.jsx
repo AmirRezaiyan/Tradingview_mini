@@ -1,4 +1,3 @@
-// src/pages/Dashboard.jsx
 import React, { useEffect, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Header from "../components/Header";
@@ -59,7 +58,6 @@ export default function Dashboard() {
 
       {/* Body */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Sidebar — همیشه mounted باشه تا state داخلی (favorites) از بین نره */}
         <div
           className={`transition-all duration-500 ease-in-out transform ${
             sidebarOpen ? "translate-x-0 opacity-100 w-64" : "-translate-x-72 opacity-0 w-64"
@@ -71,7 +69,7 @@ export default function Dashboard() {
               onSelectSymbol={handleSelect}
               activeSymbol={symbol}
               activeMarket={market}
-              onOpenSearch={() => setSearchOpen(true)} // <- این خط اضافه شده
+              onOpenSearch={() => setSearchOpen(true)} 
             />
           </div>
         </div>

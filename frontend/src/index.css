@@ -1,6 +1,3 @@
-  /* src/index.css - Fixed for full-screen application layout */
-
-  /* Remove default styles that center content and constrain width/height */
   :root {
     font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
     line-height: 1.5;
@@ -8,7 +5,7 @@
 
     color-scheme: light dark;
     color: rgba(255, 255, 255, 0.87);
-    background-color: #0a0e12; /* Set a consistent background color */
+    background-color: #0a0e12; 
 
     font-synthesis: none;
     text-rendering: optimizeLegibility;
@@ -16,24 +13,19 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Ensure the body takes full viewport size and removes margins */
   body {
     margin: 0;
     min-width: 100vw;
     min-height: 100vh;
-    /* Remove place-items: center; and display: flex; from body to allow full-screen layout */
   }
 
-  /* Ensure the root element takes full viewport size */
   #root {
     width: 100vw;
     height: 100vh;
     margin: 0;
     padding: 0;
-    /* Remove max-width and padding from the previous App.css settings */
   }
 
-  /* Reset default button styles for consistency */
   button {
     border-radius: 8px;
     border: 1px solid transparent;

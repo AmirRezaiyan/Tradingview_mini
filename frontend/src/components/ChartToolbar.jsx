@@ -1,4 +1,3 @@
-// frontend/src/components/ChartToolbar.jsx
 import React, { useState } from "react";
 import {
   FaRuler,
