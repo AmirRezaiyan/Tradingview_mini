@@ -1,37 +1,39 @@
+
 import React from "react";
 import { FaBars, FaSearch } from "react-icons/fa";
 
-export default function Header({ onToggleSidebar, onOpenSearch }) {
+export default function Header({
+  onToggleSidebar,
+  onOpenSearch,
+  searchButtonRef,
+}) {
   return (
-    <header className="h-16 flex items-center justify-between px-4 sm:px-6 bg-[#0b0f14] text-gray-100 border-b border-gray-800 shadow-md">
-      {/* Left: Sidebar toggle */}
+    <header className="flex min-h-14 shrink-0 items-center justify-between gap-2 border-b border-gray-800 bg-[#0b0f14] px-3 text-gray-100 sm:px-4 lg:h-16">
       <button
+        type="button"
         onClick={onToggleSidebar}
-        className="p-2 rounded-md hover:bg-gray-800 transition-all duration-200"
-        aria-label="Toggle sidebar"
+        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-gray-700 text-gray-200 hover:bg-gray-800"
+        aria-label="Toggle watchlist panel"
       >
-        <FaBars className="w-5 h-5 text-gray-300" />
+        <FaBars aria-hidden="true" className="h-5 w-5" />
       </button>
 
-      {/* Center: Search button */}
-      <div className="flex-1 flex justify-center px-2">
+      <div className="flex min-w-0 flex-1 justify-center">
         <button
+          ref={searchButtonRef}
+          type="button"
           onClick={onOpenSearch}
-          className="w-full max-w-md md:max-w-lg flex items-center justify-center gap-3 py-2 px-4 
-                     rounded-xl bg-gradient-to-r from-indigo-600 to-teal-500 text-white font-medium shadow-lg
-                     hover:scale-105 active:scale-95 transform transition-all duration-200
-                     focus:outline-none focus:ring-2 focus:ring-indigo-400"
+          className="flex min-h-11 w-full max-w-lg min-w-0 items-center justify-center gap-2 rounded-md border border-sky-700 bg-[#10202b] px-3 py-2 text-white hover:bg-[#173140]"
           aria-label="Open symbol search"
         >
-          <FaSearch className="w-4 h-4" />
-          <span className="text-sm sm:text-base font-semibold">
-            Search symbols (Crypto & Forex)
+          <FaSearch aria-hidden="true" className="h-4 w-4 shrink-0" />
+          <span className="truncate text-sm font-semibold">
+            Search symbols
           </span>
         </button>
       </div>
 
-      {/* Right: empty space for layout balance */}
-      <div className="w-6" />
+      <div aria-hidden="true" className="w-11 shrink-0" />
     </header>
   );
 }

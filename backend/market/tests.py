@@ -47,9 +47,53 @@ class MarketEndpointTests(TestCase):
 		second = self.client.get("/api/market/crypto/?symbol=BTCUSDT&interval=1h&limit=25")
 
 		self.assertEqual(first.status_code, 200)
+		self.assertEqual(set(first.data), {"symbol", "interval", "candles"})
 		self.assertEqual(first.data["candles"][0]["time"], 1700000000)
 		self.assertEqual(second.data, first.data)
 		provider.assert_called_once_with("BTCUSDT", "1h", 25)
+
+	@patch("market.views.get_crypto_candles", return_value={
+		"symbol": "BTCUSDT",
+		"interval": "1h",
+		"candles": [],
+	})
+	def test_empty_candle_response_is_a_wrapped_empty_list(self, provider):
+		response = self.client.get("/api/market/crypto/?symbol=BTCUSDT&interval=1h")
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data, {"symbol": "BTCUSDT", "interval": "1h", "candles": []})
+		provider.assert_called_once_with("BTCUSDT", "1h", 200)
+
+	@patch("market.views.get_crypto_candles", side_effect=ProviderError("invalid_provider_response"))
+	def test_malformed_candle_provider_response_is_a_structured_error(self, provider):
+		response = self.client.get("/api/market/crypto/?symbol=BTCUSDT&interval=1h")
+
+		self.assertEqual(response.status_code, 502)
+		self.assertEqual(response.data["code"], "invalid_provider_response")
+		self.assertIsInstance(response.data["error"], str)
+		provider.assert_called_once()
+
+	@patch("market.views.get_latest_price", return_value={
+		"symbol": "BTCUSDT",
+		"price": 123.45,
+		"timestamp": None,
+	})
+	def test_latest_price_response_has_numeric_price(self, provider):
+		response = self.client.get("/api/market/crypto/latest_price/?symbol=BTCUSDT")
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(set(response.data), {"symbol", "price", "timestamp"})
+		self.assertIsInstance(response.data["price"], float)
+		provider.assert_called_once_with("BTCUSDT")
+
+	@patch("market.views.get_latest_price", side_effect=ProviderError("provider_timeout"))
+	def test_latest_price_provider_failure_uses_structured_error(self, provider):
+		response = self.client.get("/api/market/crypto/latest_price/?symbol=BTCUSDT")
+
+		self.assertEqual(response.status_code, 504)
+		self.assertEqual(response.data["code"], "provider_timeout")
+		self.assertIsInstance(response.data["error"], str)
+		provider.assert_called_once()
 
 	@patch("market.views.get_forex_latest_price")
 	def test_forex_latest_price_uses_provider_service(self, provider):

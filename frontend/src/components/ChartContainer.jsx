@@ -69,44 +69,6 @@ function IndicatorModal({ isOpen, onClose }) {
       )
     );
   }, [search]);
-
-
-  useEffect(() => {
-    return () => {
-      // unsubscribe timeScale visible-range listener if present
-      try {
-        const unsub = indicatorsUnsubscribeRef.current;
-        if (typeof unsub === 'function') {
-          try { unsub(); } catch (e) { /* ignore */ }
-        } else if (unsub && typeof unsub.unsubscribe === 'function') {
-          try { unsub.unsubscribe(); } catch (e) { /* ignore */ }
-        }
-      } catch (e) { /* ignore */ }
-
-      // remove global resize handler registered by ensureIndicatorsSync
-      try {
-        if (indicatorsPanelsRef.current && indicatorsPanelsRef.current.__resizeRegistered && indicatorsPanelsRef.current.__resizeHandler) {
-          window.removeEventListener('resize', indicatorsPanelsRef.current.__resizeHandler);
-        }
-      } catch (e) { /* ignore */ }
-
-      // disconnect per-panel ResizeObservers and optionally remove panel charts
-      try {
-        Object.values(indicatorsPanelsRef.current || {}).forEach((p) => {
-          if (!p) return;
-          try {
-            if (p.container && p.container._resizeObserver && typeof p.container._resizeObserver.disconnect === 'function') {
-              p.container._resizeObserver.disconnect();
-              delete p.container._resizeObserver;
-            }
-          } catch (e) { /* ignore */ }
-          // Do NOT forcibly remove charts if they may be reused; uncomment if you want full teardown:
-          // try { if (p.chart && typeof p.chart.remove === 'function') p.chart.remove(); } catch(e){ }
-        });
-      } catch (e) { /* ignore */ }
-    };
-  }, []);
-
   useEffect(() => {
     if (!isOpen) setSearch("");
   }, [isOpen]);
@@ -192,34 +154,44 @@ const STORAGE_PREFIX = "tvmini:drawings:v1";
 // -----------------------------------------------------------------------------
 
 const resizeIndicatorPanel = (container, chart) => {
-  if (!container || !chart) return;
+  if (!container?.isConnected || !chart) return;
   try {
     const width = container.clientWidth || container.offsetWidth || 600;
     const height = container.clientHeight || container.offsetHeight || 150;
     chart.resize(width, height);
-
-    setTimeout(() => {
-      try {
-        chart.resize(width, height);
-      } catch (e) { }
-    }, 50);
-  } catch (e) { }
+  } catch (error) {
+    console.warn("Indicator chart resize failed:", error);
+  }
 };
 
-const registerResizeObserverForPanel = (panelId, container, chart) => {
-  if (!container || !chart) return;
+const registerResizeObserverForPanel = (container, chart) => {
+  if (!container || !chart || typeof ResizeObserver === "undefined") return;
 
   try {
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        resizeIndicatorPanel(container, chart);
-      }
-    });
-
+    const observer = new ResizeObserver(() => resizeIndicatorPanel(container, chart));
     observer.observe(container);
-    container._resizeObserver = observer;
-  } catch (e) { }
+    return observer;
+  } catch (error) {
+    console.warn("Indicator chart resize observer failed:", error);
+  }
 };
+
+function disposeIndicatorPane(panel) {
+  if (!panel) return;
+  try { panel.resizeObserver?.disconnect(); } catch (error) { console.warn("Indicator resize observer cleanup failed:", error); }
+  try { panel.chart?.remove(); } catch (error) { console.warn("Indicator chart cleanup failed:", error); }
+  try { panel.container?.remove(); } catch (error) { console.warn("Indicator container cleanup failed:", error); }
+}
+
+function syncIndicatorInitial(mainChart, panelChart, panelContainer) {
+  resizeIndicatorPanel(panelContainer, panelChart);
+  try {
+    const range = mainChart?.timeScale().getVisibleLogicalRange();
+    if (range) panelChart?.timeScale().setVisibleLogicalRange(range);
+  } catch (error) {
+    console.warn("Indicator time-range sync failed:", error);
+  }
+}
 
 
 function parseTimeToSec(t) {
@@ -332,6 +304,11 @@ function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v));
 }
 
+function requestErrorMessage(error, fallback) {
+  const message = error?.response?.data?.error || error?.response?.data?.detail || error?.message;
+  return typeof message === "string" && message.trim() ? message : fallback;
+}
+
 // -----------------------------------------------------------------------------
 // Main component
 // -----------------------------------------------------------------------------
@@ -339,6 +316,7 @@ export default function ChartContainer({
   marketType = "crypto",
   symbol = "BTCUSDT",
   interval = "1h",
+  onLivePrice,
 }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -346,9 +324,17 @@ export default function ChartContainer({
   const svgRef = useRef(null);
   const resizeObserverRef = useRef(null);
   const [lastCandle, setLastCandle] = useState(null);
+  const [latestPrice, setLatestPrice] = useState(null);
+  const [latestPriceError, setLatestPriceError] = useState("");
+  const [latestPriceLoading, setLatestPriceLoading] = useState(false);
+  const [latestPriceRetry, setLatestPriceRetry] = useState(0);
   const [remainingSec, setRemainingSec] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [chartError, setChartError] = useState("");
+  const [chartRetry, setChartRetry] = useState(0);
   const [fade, setFade] = useState(false);
+  const fadeTimeoutRef = useRef(null);
+  const restoringTimeoutRef = useRef(null);
 
   const [activeTool, setActiveTool] = useState(null);
   const [drawings, setDrawings] = useState([]);
@@ -357,46 +343,88 @@ export default function ChartContainer({
   const [activeIndicators, setActiveIndicators] = useState([]);
   const [candlesData, setCandlesData] = useState([]);
   const isDrawingRef = useRef(false);
+  const drawingMovedRef = useRef(false);
+  const drawingPhaseRef = useRef("idle");
+  const cancelDrawingOperationRef = useRef(null);
   const indicatorSeriesRef = useRef({});
   const [showManageDrawings, setShowManageDrawings] = useState(false);
   const [showManageIndicators, setShowManageIndicators] = useState(false);
+  const [menuPosition, setMenuPosition] = useState(null);
 
   const interactionDisabledRef = useRef(false);
 
   const indicatorsPanelsRef = useRef({});          // store { id: { chart, container } }
-  const indicatorsSyncRef = useRef(false);         // ensureIndicatorsSync run-once guard
   const indicatorsUnsubscribeRef = useRef(null);
 
   const isRestoringRef = useRef(false);
 
   const [selectedId, setSelectedId] = useState(null);
   const editingRef = useRef({ mode: null, id: null, startMouseX: 0, startMouseY: 0, orig: null });
+  const editListenersRef = useRef(null);
+  const drawingStateRef = useRef({ activeTool, currentDrawing, lastCandle });
+  drawingStateRef.current = { activeTool, currentDrawing, lastCandle };
 
   const storageKey = () => `${STORAGE_PREFIX}:${marketType}:${String(symbol).toUpperCase()}:${interval}`;
 
+  const positionManagementMenu = (event, maxWidth) => {
+    if (window.innerWidth >= 1024) {
+      setMenuPosition(null);
+      return;
+    }
+    const triggerBounds = event.currentTarget.getBoundingClientRect();
+    setMenuPosition({
+      top: triggerBounds.bottom + 8,
+      right: 8,
+      width: `min(${maxWidth}px, calc(100vw - 16px))`,
+    });
+  };
+
+
   const getChartInnerSize = () => {
     try {
-      if (!containerRef.current) return { width: 800, height: 400, left: 0, top: 0 };
-      const containerRect = containerRef.current.getBoundingClientRect();
-      const canvas = containerRef.current.querySelector('canvas');
-      if (canvas && canvas.getBoundingClientRect) {
-        const r = canvas.getBoundingClientRect();
-        const left = Math.max(0, Math.floor(r.left - containerRect.left));
-        const top = Math.max(0, Math.floor(r.top - containerRect.top));
-        return { width: Math.max(0, Math.floor(r.width)), height: Math.max(0, Math.floor(r.height)), left, top };
+      const element = containerRef.current;
+
+      if (!element) {
+        return {
+          width: 800,
+          height: 400,
+          left: 0,
+          top: 0,
+        };
       }
-      return { width: Math.max(0, containerRef.current.clientWidth - RIGHT_GUTTER), height: containerRef.current.clientHeight, left: 0, top: 0 };
-    } catch (e) {
-      return { width: 800, height: 400, left: 0, top: 0 };
+
+      // Use the chart container as the shared coordinate origin
+      // for both pointer events and the SVG drawing overlay.
+      const rect = element.getBoundingClientRect();
+
+      return {
+        width: Math.max(0, rect.width),
+        height: Math.max(0, rect.height),
+        left: 0,
+        top: 0,
+      };
+    } catch (error) {
+      console.warn("Failed to get chart dimensions:", error);
+
+      return {
+        width: 800,
+        height: 400,
+        left: 0,
+        top: 0,
+      };
     }
   };
 
   const getCanvasRect = () => {
-    if (!containerRef.current) return null;
-    const canvas = containerRef.current.querySelector('canvas');
-    if (!canvas || !canvas.getBoundingClientRect) return null;
-    return canvas.getBoundingClientRect();
+    // Keep the existing function name so existing callers continue working.
+    // Coordinates must be relative to the chart container, not an inner canvas.
+    const element = containerRef.current;
+
+    if (!element) return null;
+
+    return element.getBoundingClientRect();
   };
+
 
   const persistDrawings = (list) => {
     try {
@@ -415,6 +443,14 @@ export default function ChartContainer({
         if (Number.isFinite(d.startY)) out.startY = d.startY;
         if (Number.isFinite(d.endX)) out.endX = d.endX;
         if (Number.isFinite(d.endY)) out.endY = d.endY;
+        if (Array.isArray(d.points)) {
+          out.points = d.points.map((point) => ({
+            time: point.time ?? null,
+            price: point.price ?? null,
+            x: Number.isFinite(point.x) ? point.x : null,
+            y: Number.isFinite(point.y) ? point.y : null,
+          }));
+        }
         return out;
       });
       const wrapper = { version: 1, marketType, symbol: String(symbol).toUpperCase(), interval, drawings: payload, savedAt: Date.now() };
@@ -423,6 +459,8 @@ export default function ChartContainer({
       console.warn("Failed to persist drawings:", e);
     }
   };
+  const persistDrawingsRef = useRef(persistDrawings);
+  persistDrawingsRef.current = persistDrawings;
 
   const projectDrawingsToPixels = (loaded) => {
     if (!chartRef.current || !candleSeriesRef.current) {
@@ -436,9 +474,16 @@ export default function ChartContainer({
       const width = inner.width;
 
       return loaded.map((d) => {
+        const points = Array.isArray(d.points)
+          ? d.points.map((point) => {
+            const x = point.time != null ? timeScale.timeToCoordinate(point.time) : null;
+            const y = point.price != null ? s.priceToCoordinate(point.price) : null;
+            return { ...point, x: x ?? point.x, y: y ?? point.y };
+          })
+          : d.points;
         const hasPixel = Number.isFinite(d.startX) && Number.isFinite(d.startY) && Number.isFinite(d.endX) && Number.isFinite(d.endY);
         if (hasPixel) {
-          return { ...d };
+          return { ...d, points };
         }
         const x1 = typeof timeScale.timeToCoordinate === 'function' && d.startTime != null ? timeScale.timeToCoordinate(d.startTime) : null;
         const y1 = s && typeof s.priceToCoordinate === 'function' && d.startPrice != null ? s.priceToCoordinate(d.startPrice) : null;
@@ -447,15 +492,15 @@ export default function ChartContainer({
 
         if (d.type === "hline") {
           const y = (y1 != null) ? y1 : (Number.isFinite(d.startY) ? d.startY : null);
-          if (y == null) return { ...d, startX: null, startY: null, endX: null, endY: null };
-          return { ...d, startX: left, startY: y, endX: left + Math.max(0, width), endY: y };
+          if (y == null) return { ...d, startX: null, startY: null, endX: null, endY: null, points };
+          return { ...d, startX: left, startY: y, endX: left + Math.max(0, width), endY: y, points };
         }
 
         if (x1 != null && y1 != null && x2 != null && y2 != null) {
-          return { ...d, startX: x1, startY: y1, endX: x2, endY: y2 };
+          return { ...d, startX: x1, startY: y1, endX: x2, endY: y2, points };
         }
 
-        return { ...d, startX: (Number.isFinite(d.startX) ? d.startX : null), startY: (Number.isFinite(d.startY) ? d.startY : null), endX: (Number.isFinite(d.endX) ? d.endX : null), endY: (Number.isFinite(d.endY) ? d.endY : null) };
+        return { ...d, startX: (Number.isFinite(d.startX) ? d.startX : null), startY: (Number.isFinite(d.startY) ? d.startY : null), endX: (Number.isFinite(d.endX) ? d.endX : null), endY: (Number.isFinite(d.endY) ? d.endY : null), points };
       });
     } catch (err) {
       console.warn("projectDrawingsToPixels failed:", err);
@@ -488,7 +533,8 @@ export default function ChartContainer({
 
       setDrawings(loaded);
 
-      setTimeout(() => {
+      clearTimeout(restoringTimeoutRef.current);
+      restoringTimeoutRef.current = setTimeout(() => {
         isRestoringRef.current = false;
       }, 500);
     } catch (e) {
@@ -533,15 +579,19 @@ export default function ChartContainer({
 
     restoreDrawings();
 
-    const resizeHandler = () => {
-      if (containerRef.current && chartRef.current) {
-        chartRef.current.applyOptions({
-          width: containerRef.current.clientWidth,
-          height: containerRef.current.clientHeight,
-        });
-      }
+    const mainTimeScale = chart.timeScale();
+    const rangeHandler = (range) => {
+      if (!range) return;
+      Object.values(indicatorsPanelsRef.current).forEach((panel) => {
+        try {
+          panel.chart.timeScale().setVisibleLogicalRange(range);
+        } catch (error) {
+          console.warn("Indicator range synchronization failed:", error);
+        }
+      });
     };
-    window.addEventListener("resize", resizeHandler);
+    mainTimeScale.subscribeVisibleLogicalRangeChange(rangeHandler);
+    indicatorsUnsubscribeRef.current = { timeScale: mainTimeScale, handler: rangeHandler };
     try {
       const ro = new ResizeObserver(() => {
         try {
@@ -558,20 +608,46 @@ export default function ChartContainer({
     } catch (e) { /* ignore if ResizeObserver not available */ }
 
     return () => {
-      window.removeEventListener("resize", resizeHandler);
-      try { if (resizeObserverRef.current) { resizeObserverRef.current.disconnect(); resizeObserverRef.current = null; } } catch(e) {}
+      clearTimeout(restoringTimeoutRef.current);
+      if (editListenersRef.current) {
+        window.removeEventListener("mousemove", editListenersRef.current.move);
+        window.removeEventListener("mouseup", editListenersRef.current.up);
+        editListenersRef.current = null;
+      }
+      try { if (resizeObserverRef.current) { resizeObserverRef.current.disconnect(); resizeObserverRef.current = null; } } catch (e) { }
+      const rangeSubscription = indicatorsUnsubscribeRef.current;
+      if (rangeSubscription) {
+        try {
+          rangeSubscription.timeScale.unsubscribeVisibleLogicalRangeChange(rangeSubscription.handler);
+        } catch (error) {
+          console.warn("Main chart range subscription cleanup failed:", error);
+        }
+        indicatorsUnsubscribeRef.current = null;
+      }
+      Object.values(indicatorsPanelsRef.current).forEach(disposeIndicatorPane);
+      indicatorsPanelsRef.current = {};
+      indicatorSeriesRef.current = {};
       try {
         chart.remove();
       } catch (e) { }
       chartRef.current = null;
       candleSeriesRef.current = null;
-      setLastCandle(null);
     };
   }, []);
 
   useEffect(() => {
     restoreDrawings();
   }, [symbol, interval, marketType]);
+
+  useEffect(() => {
+    const closeMenusOnResize = () => {
+      setShowManageDrawings(false);
+      setShowManageIndicators(false);
+      setMenuPosition(null);
+    };
+    window.addEventListener("resize", closeMenusOnResize);
+    return () => window.removeEventListener("resize", closeMenusOnResize);
+  }, []);
 
   // -----------------------------------------------------------------------
   // Toolbar event handling
@@ -585,10 +661,21 @@ export default function ChartContainer({
         setActiveTool(null);
         return;
       }
+      if (isDrawingRef.current) {
+        isDrawingRef.current = false;
+        drawingMovedRef.current = false;
+        drawingPhaseRef.current = "idle";
+        drawingStateRef.current.currentDrawing = null;
+        setCurrentDrawing(null);
+        setChartInteraction(true);
+      }
       setActiveTool(tool);
       if (!tool) {
         isDrawingRef.current = false;
+        drawingMovedRef.current = false;
+        drawingPhaseRef.current = "idle";
         setCurrentDrawing(null);
+        setChartInteraction(true);
       }
     };
 
@@ -611,12 +698,9 @@ export default function ChartContainer({
       const indicator = e.detail?.indicator;
       if (!indicator) return;
       console.log("📊 Indicator selected:", indicator);
-      const exists = activeIndicators.find((ind) => ind.id === indicator.id);
-      if (exists) {
-        console.log("⚠️ Indicator already exists");
-        return;
-      }
-      setActiveIndicators((prev) => [...prev, indicator]);
+      setActiveIndicators((prev) => prev.some((item) => item.id === indicator.id)
+        ? prev
+        : [...prev, indicator]);
     };
 
     window.addEventListener("tvmini:add:indicator", handleAddIndicator);
@@ -630,32 +714,31 @@ export default function ChartContainer({
       window.removeEventListener("tvmini:indicator:selected", handleAddIndicator);
       window.removeEventListener("tvmini:indicator", handleAddIndicator);
     };
-  }, [activeIndicators]);
+  }, []);
 
   // -----------------------------------------------------------------------
   // Indicator calculation & display (با پشتیبانی کامل RSI و MACD در پنل جداگانه)
   // -----------------------------------------------------------------------
   useEffect(() => {
-    if (!chartRef.current || !candlesData.length || !activeIndicators.length) return;
+    if (!chartRef.current) return;
 
-    console.log("📈 Calculating indicators for", candlesData.length, "candles");
+    const activeOverlayKeys = new Set();
+    activeIndicators.forEach((indicator) => {
+      if (indicator.id === "sma" || indicator.id === "ema") {
+        const period = indicator.defaultParams?.period || 20;
+        activeOverlayKeys.add(`${indicator.id}_${period}`);
+      }
+    });
 
-    // حذف اندیکاتورهای قبلی
     Object.keys(indicatorSeriesRef.current).forEach((key) => {
-      const item = indicatorSeriesRef.current[key];
+      if (activeOverlayKeys.has(key)) return;
       try {
-        if (item && typeof item.remove === 'function') {
-          item.remove();
-        } else if (item && item.series) {
-          chartRef.current.removeSeries(item.series);
-        } else if (item) {
-          chartRef.current.removeSeries(item);
-        }
+        chartRef.current.removeSeries(indicatorSeriesRef.current[key]);
       } catch (e) {
         console.warn("Error removing series:", e);
       }
+      delete indicatorSeriesRef.current[key];
     });
-    indicatorSeriesRef.current = {};
 
     activeIndicators.forEach((indicator) => {
       try {
@@ -666,39 +749,57 @@ export default function ChartContainer({
           case "sma": {
             const period = indicator.defaultParams?.period || 20;
             data = calculateSMA(candlesData, period);
-            series = chartRef.current.addLineSeries({
-              color: "#2962FF",
-              lineWidth: 2,
-              title: `SMA(${period})`,
-              lastValueVisible: true,
-              priceLineVisible: false,
-            });
-            series.setData(data);
-            indicatorSeriesRef.current[`sma_${period}`] = series;
-            console.log(`✅ SMA(${period}) added to main chart`);
+            series = indicatorSeriesRef.current[`sma_${period}`];
+            if (!series && data.length) {
+              series = chartRef.current.addLineSeries({
+                color: "#2962FF",
+                lineWidth: 2,
+                title: `SMA(${period})`,
+                lastValueVisible: true,
+                priceLineVisible: false,
+              });
+              indicatorSeriesRef.current[`sma_${period}`] = series;
+            }
+            if (series) series.setData(data);
             break;
           }
 
           case "ema": {
             const period = indicator.defaultParams?.period || 20;
             data = calculateEMA(candlesData, period);
-            series = chartRef.current.addLineSeries({
-              color: "#FF6D00",
-              lineWidth: 2,
-              title: `EMA(${period})`,
-              lastValueVisible: true,
-              priceLineVisible: false,
-            });
-            series.setData(data);
-            indicatorSeriesRef.current[`ema_${period}`] = series;
-            console.log(`✅ EMA(${period}) added to main chart`);
+            series = indicatorSeriesRef.current[`ema_${period}`];
+            if (!series && data.length) {
+              series = chartRef.current.addLineSeries({
+                color: "#FF6D00",
+                lineWidth: 2,
+                title: `EMA(${period})`,
+                lastValueVisible: true,
+                priceLineVisible: false,
+              });
+              indicatorSeriesRef.current[`ema_${period}`] = series;
+            }
+            if (series) series.setData(data);
             break;
           }
 
           case "rsi": {
             const period = indicator.defaultParams?.period || 14;
             data = calculateRSI(candlesData, period);
-            console.log(`✅ RSI(${period}) calculated:`, Array.isArray(data) ? data.length : 'non-array');
+            const rsiSafeData = Array.isArray(data) ? data : (data && Array.isArray(data.values) ? data.values : Object.values(data || {}));
+            const existingPanel = indicatorsPanelsRef.current.rsi;
+            if (existingPanel) {
+              existingPanel.series.value.setData(rsiSafeData);
+              const thresholdData = rsiSafeData.map((point) => ({ time: point.time, value: 70 }));
+              const oversoldData = rsiSafeData.map((point) => ({ time: point.time, value: 30 }));
+              existingPanel.series.overbought.setData(thresholdData);
+              existingPanel.series.oversold.setData(oversoldData);
+              const lastPoint = rsiSafeData.at(-1);
+              const lastValue = lastPoint ? (lastPoint.value ?? lastPoint.v ?? lastPoint.y ?? lastPoint.close ?? null) : null;
+              const legend = existingPanel.container.querySelector('.indicator-legend');
+              if (legend) legend.innerHTML = `RSI(${period}) <span style="color:#9C27B0; margin-left:8px">${(lastValue != null && !isNaN(lastValue)) ? Number(lastValue).toFixed(2) : '–'}</span>`;
+              break;
+            }
+            if (!rsiSafeData.length) break;
 
             // helper: climb DOM to find the panels container (flex-1 flex-col)
             const findPanelsParent = (start) => {
@@ -715,24 +816,20 @@ export default function ChartContainer({
               return null;
             };
 
-            let rsiContainer = document.getElementById('rsi-chart-container');
-            if (!rsiContainer) {
-              rsiContainer = document.createElement('div');
-              rsiContainer.id = 'rsi-chart-container';
-              // اعمال مستقیم استایل‌ها
-              Object.assign(rsiContainer.style, {
-                width: '100%',
-                height: '180px',
-                marginTop: '8px',
-                border: '1px solid #262b33',
-                borderRadius: '8px',
-                backgroundColor: '#0b0f14',
-                position: 'relative',
-                overflow: 'hidden',
-                flex: '0 0 auto'
-              });
-              rsiContainer.classList.add('indicator-panel');
-            }
+            const rsiContainer = document.createElement('div');
+            rsiContainer.id = 'rsi-chart-container';
+            Object.assign(rsiContainer.style, {
+              width: '100%',
+              height: '180px',
+              marginTop: '8px',
+              border: '1px solid #262b33',
+              borderRadius: '8px',
+              backgroundColor: '#0b0f14',
+              position: 'relative',
+              overflow: 'hidden',
+              flex: '0 0 auto'
+            });
+            rsiContainer.classList.add('indicator-panel');
 
             // decide parent
             let panelsParent = null;
@@ -775,7 +872,6 @@ export default function ChartContainer({
               priceLineVisible: false,
             });
 
-            const rsiSafeData = Array.isArray(data) ? data : (data && Array.isArray(data.values) ? data.values : Object.values(data || {}));
             try { rsiSeries.setData(Array.isArray(rsiSafeData) ? rsiSafeData : []); } catch (e) { console.warn('rsiSeries.setData failed', e); }
 
             // overbought/oversold lines (70/30)
@@ -814,46 +910,15 @@ export default function ChartContainer({
               legend.innerHTML = `RSI(${period}) <span style="color:#9C27B0; margin-left:8px">${(lastVal != null && !isNaN(lastVal)) ? Number(lastVal).toFixed(2) : '–'}</span>`;
             } catch (e) { /* ignore legend failures */ }
 
-            // register panel (fallback)
-            try {
-              const panelsRefObj = (typeof indicatorsPanelsRef !== 'undefined') ? indicatorsPanelsRef : (window.__indicatorsPanelsRef_fallback = window.__indicatorsPanelsRef_fallback || { current: {} });
-              if (panelsRefObj && panelsRefObj.current) {
-                panelsRefObj.current['rsi'] = { chart: rsiChart, container: rsiContainer };
-              } else {
-                window.__indicatorsPanelsRef_fallback.current['rsi'] = { chart: rsiChart, container: rsiContainer };
-              }
-
-              // اول ensureIndicatorsSync را فراخوانی کن تا listener ثبت شود
-              try { ensureIndicatorsSync(); } catch (e) { }
-
-              // سپس ResizeObserver را ثبت کن
-              try { registerResizeObserverForPanel('rsi', rsiContainer, rsiChart); } catch (e) { }
-
-              // همگام‌سازی اولیه فوری
-              try { syncIndicatorInitial(rsiChart, rsiContainer); } catch (e) { }
-
-              // چند مرحله resize و sync برای اطمینان
-              setTimeout(() => {
-                try {
-                  rsiChart.resize(rsiContainer.clientWidth, rsiContainer.clientHeight);
-                  syncIndicatorInitial(rsiChart, rsiContainer);
-                } catch (e) { }
-              }, 50);
-
-              setTimeout(() => {
-                try {
-                  rsiChart.resize(rsiContainer.clientWidth, rsiContainer.clientHeight);
-                  syncIndicatorInitial(rsiChart, rsiContainer);
-                } catch (e) { }
-              }, 150);
-
-              setTimeout(() => {
-                try {
-                  rsiChart.resize(rsiContainer.clientWidth, rsiContainer.clientHeight);
-                  syncIndicatorInitial(rsiChart, rsiContainer);
-                } catch (e) { }
-              }, 300);
-            } catch (e) { console.warn('register rsi panel failed', e); }
+            const rsiPanel = {
+              chart: rsiChart,
+              container: rsiContainer,
+              series: { value: rsiSeries, overbought: overboughtLine, oversold: oversoldLine },
+            };
+            indicatorsPanelsRef.current.rsi = rsiPanel;
+            rsiPanel.resizeObserver = registerResizeObserverForPanel(rsiContainer, rsiChart);
+            resizeIndicatorPanel(rsiContainer, rsiChart);
+            syncIndicatorInitial(chartRef.current, rsiChart, rsiContainer);
 
             console.log(`✅ RSI(${period}) chart created below main chart`);
             break;
@@ -863,7 +928,31 @@ export default function ChartContainer({
           case "macd": {
             const { fast = 12, slow = 26, signal = 9 } = indicator.defaultParams || {};
             data = calculateMACD(candlesData, fast, slow, signal);
-            console.log(`✅ MACD(${fast},${slow},${signal}) calculated:`, Array.isArray(data) ? data.length : 'non-array');
+            const updatedMacdArr = Array.isArray(data?.macd) ? data.macd : [];
+            const updatedSignalArr = Array.isArray(data?.signal) ? data.signal : [];
+            const histValues = Array.isArray(data?.histogram) ? data.histogram : [];
+            const updatedHistArr = histValues.map((point) => ({
+              ...point,
+              color: point.value >= 0 ? 'rgba(38,166,154,0.6)' : 'rgba(239,83,80,0.6)',
+            }));
+            const existingPanel = indicatorsPanelsRef.current.macd;
+            if (existingPanel) {
+              existingPanel.series.histogram.setData(updatedHistArr);
+              existingPanel.series.macd.setData(updatedMacdArr);
+              existingPanel.series.signal.setData(updatedSignalArr);
+              const lastMacd = updatedMacdArr.at(-1)?.value;
+              const lastSignal = updatedSignalArr.at(-1)?.value;
+              const lastHistogram = updatedHistArr.at(-1)?.value;
+              const legend = existingPanel.container.querySelector('.indicator-legend');
+              if (legend) legend.innerHTML = `
+                <div style="font-weight:600">MACD ${fast} ${slow} close</div>
+                <div style="color:#2b7cd3">MACD: ${lastMacd != null ? Number(lastMacd).toFixed(2) : '–'}</div>
+                <div style="color:#ff9800">Signal: ${lastSignal != null ? Number(lastSignal).toFixed(2) : '–'}</div>
+                <div style="color:${lastHistogram != null && lastHistogram >= 0 ? '#26a69a' : '#ef5350'}">Hist: ${lastHistogram != null ? Number(lastHistogram).toFixed(2) : '–'}</div>
+              `;
+              break;
+            }
+            if (candlesData.length < slow + signal) break;
 
             // helper to find panels parent
             const findPanelsParent = (start) => {
@@ -881,24 +970,20 @@ export default function ChartContainer({
             };
 
             // create container
-            let macdContainer = document.getElementById('macd-chart-container');
-            if (!macdContainer) {
-              macdContainer = document.createElement('div');
-              macdContainer.id = 'macd-chart-container';
-              // اعمال مستقیم استایل‌ها
-              Object.assign(macdContainer.style, {
-                width: '100%',
-                height: '180px', // کمی بلندتر برای MACD
-                marginTop: '8px',
-                border: '1px solid #262b33',
-                borderRadius: '8px',
-                backgroundColor: '#0b0f14',
-                position: 'relative',
-                overflow: 'hidden',
-                flex: '0 0 auto'
-              });
-              macdContainer.classList.add('indicator-panel');
-            }
+            const macdContainer = document.createElement('div');
+            macdContainer.id = 'macd-chart-container';
+            Object.assign(macdContainer.style, {
+              width: '100%',
+              height: '180px', // کمی بلندتر برای MACD
+              marginTop: '8px',
+              border: '1px solid #262b33',
+              borderRadius: '8px',
+              backgroundColor: '#0b0f14',
+              position: 'relative',
+              overflow: 'hidden',
+              flex: '0 0 auto'
+            });
+            macdContainer.classList.add('indicator-panel');
 
             // attach
             let panelsParent = null;
@@ -961,12 +1046,13 @@ export default function ChartContainer({
                 if (t) timesForLegend.push(t);
               });
             } else if (data && typeof data === 'object') {
-              if (Array.isArray(data.macd) || Array.isArray(data.signal) || Array.isArray(data.hist)) {
-                const len = Math.max(data.macd?.length || 0, data.signal?.length || 0, data.hist?.length || 0);
+              const histogram = data.histogram || data.hist;
+              if (Array.isArray(data.macd) || Array.isArray(data.signal) || Array.isArray(histogram)) {
+                const len = Math.max(data.macd?.length || 0, data.signal?.length || 0, histogram?.length || 0);
                 for (let i = 0; i < len; i++) {
                   const m = data.macd && data.macd[i];
                   const s = data.signal && data.signal[i];
-                  const h = data.hist && data.hist[i];
+                  const h = histogram && histogram[i];
                   const t = (m && (m.time || m.timestamp)) || (s && (s.time || s.timestamp)) || (h && (h.time || h.timestamp)) || null;
                   if (m != null) {
                     const mv = (typeof m === 'object') ? (m.value ?? m.macd ?? m) : m;
@@ -1036,17 +1122,15 @@ export default function ChartContainer({
             } catch (e) { /* ignore legend errors */ }
 
 
-            // register panel (fallback)
-            try {
-              const panelsRefObj = (typeof indicatorsPanelsRef !== 'undefined') ? indicatorsPanelsRef : (window.__indicatorsPanelsRef_fallback = window.__indicatorsPanelsRef_fallback || { current: {} });
-              if (panelsRefObj && panelsRefObj.current) {
-                panelsRefObj.current['macd'] = { chart: macdChart, container: macdContainer };
-              } else {
-                window.__indicatorsPanelsRef_fallback.current['macd'] = { chart: macdChart, container: macdContainer };
-              }
-              try { syncIndicatorInitial(macdChart); } catch (e) { }
-              setTimeout(() => { try { macdChart.resize(macdContainer.clientWidth, macdContainer.clientHeight); } catch (e) { } }, 60);
-            } catch (e) { console.warn('register macd panel failed', e); }
+            const macdPanel = {
+              chart: macdChart,
+              container: macdContainer,
+              series: { histogram: histSeries, macd: macdLine, signal: signalLine },
+            };
+            indicatorsPanelsRef.current.macd = macdPanel;
+            macdPanel.resizeObserver = registerResizeObserverForPanel(macdContainer, macdChart);
+            resizeIndicatorPanel(macdContainer, macdChart);
+            syncIndicatorInitial(chartRef.current, macdChart, macdContainer);
 
             console.log(`✅ MACD(${fast},${slow},${signal}) chart created below main chart`);
             break;
@@ -1066,114 +1150,6 @@ export default function ChartContainer({
   // -----------------------------
   // زمان‌بندی و سینک کردن پنل‌ها
   // -----------------------------
-  const getMainTimeScaleObj = () => {
-    if (!chartRef?.current) return null;
-    try {
-      // بعضی نسخه‌ها timeScale یک متد است، بعضیا یک آبجکت
-      return typeof chartRef.current.timeScale === 'function' ? chartRef.current.timeScale() : chartRef.current.timeScale;
-    } catch (e) { return chartRef.current.timeScale || null; }
-  };
-
-  const applyRangeToPanel = (panelChart, range) => {
-    if (!panelChart || !range) return;
-    try {
-      // دو API متداول را امتحان کن (visible range و logical range)
-      if (typeof panelChart.timeScale === 'function') {
-        const ts = panelChart.timeScale();
-        if (ts && typeof ts.setVisibleRange === 'function' && range.from !== undefined) {
-          ts.setVisibleRange(range);
-          return;
-        }
-        if (ts && typeof ts.setVisibleLogicalRange === 'function') {
-          ts.setVisibleLogicalRange(range);
-          return;
-        }
-      } else if (panelChart.timeScale) {
-        const ts = panelChart.timeScale;
-        if (ts && typeof ts.setVisibleRange === 'function' && range.from !== undefined) {
-          ts.setVisibleRange(range);
-          return;
-        }
-        if (ts && typeof ts.setVisibleLogicalRange === 'function') {
-          ts.setVisibleLogicalRange(range);
-          return;
-        }
-      }
-    } catch (e) { /* ignore */ }
-  };
-
-  const ensureIndicatorsSync = () => {
-    try {
-      if (!chartRef?.current) return;
-      if (indicatorsSyncRef.current) return; // فقط یکبار register میشه
-
-      const mainTs = getMainTimeScaleObj();
-      if (!mainTs) { indicatorsSyncRef.current = true; return; }
-
-      // خواندن visible range (دو نوع API ممکن)
-      let visibleRange = null;
-      try {
-        if (typeof mainTs.getVisibleRange === 'function') {
-          visibleRange = mainTs.getVisibleRange();
-        } else if (typeof mainTs.getVisibleLogicalRange === 'function') {
-          visibleRange = mainTs.getVisibleLogicalRange();
-        }
-      } catch (e) { visibleRange = null; }
-
-      // اعمال اولیه visible range به همه پنل‌ها
-      Object.values(indicatorsPanelsRef.current || {}).forEach(p => {
-        if (!p) return;
-        try { applyRangeToPanel(p.chart, visibleRange); } catch (e) { }
-      });
-
-      // ثبت یک handler برای تغییرات آتی visible range
-      // سعی کن هر دو subscribe API را پشتیبانی کنیم
-      try {
-        if (typeof mainTs.subscribeVisibleTimeRangeChange === 'function') {
-          indicatorsUnsubscribeRef.current = mainTs.subscribeVisibleTimeRangeChange((range) => {
-            if (!range) return;
-            Object.values(indicatorsPanelsRef.current || {}).forEach(p => {
-              try { applyRangeToPanel(p.chart, range); } catch (e) { }
-            });
-          });
-        } else if (typeof mainTs.subscribeVisibleLogicalRangeChange === 'function') {
-          indicatorsUnsubscribeRef.current = mainTs.subscribeVisibleLogicalRangeChange((range) => {
-            if (!range) return;
-            Object.values(indicatorsPanelsRef.current || {}).forEach(p => {
-              try { applyRangeToPanel(p.chart, range); } catch (e) { }
-            });
-          });
-        } else {
-          // fallback: اگر هیچ subscribe در اختیار نیست، هر بار که اندیکاتور ساخته شد ما visible range را دستی sync می‌کنیم (در syncIndicatorInitial)
-          indicatorsUnsubscribeRef.current = null;
-        }
-      } catch (e) {
-        indicatorsUnsubscribeRef.current = null;
-      }
-
-      // ثبت resize handler که همه پنل‌ها را resize کند (یکبار)
-      if (!indicatorsPanelsRef.current.__resizeRegistered) {
-        indicatorsPanelsRef.current.__resizeRegistered = true;
-        indicatorsPanelsRef.current.__resizeHandler = () => {
-          Object.values(indicatorsPanelsRef.current || {}).forEach(p => {
-            try {
-              if (p && p.chart && p.container) {
-                p.chart.resize(p.container.clientWidth, p.container.clientHeight);
-              }
-            } catch (e) { }
-          });
-        };
-        window.addEventListener('resize', indicatorsPanelsRef.current.__resizeHandler);
-      }
-
-      indicatorsSyncRef.current = true;
-    } catch (e) {
-      console.warn('ensureIndicatorsSync failed', e);
-      indicatorsSyncRef.current = true;
-    }
-  };
-
-
   // تابع حذف اندیکاتور
   const removeIndicator = (indicatorId) => {
     console.log("🗑️ Removing indicator:", indicatorId);
@@ -1181,133 +1157,38 @@ export default function ChartContainer({
     // حذف از لیست فعال
     setActiveIndicators((prev) => prev.filter(ind => ind.id !== indicatorId));
 
-    // حذف سریال و چارت‌های مربوطه
+    // Remove main-chart overlay series through the owning chart API.
     Object.keys(indicatorSeriesRef.current).forEach((key) => {
       if (key.startsWith(indicatorId)) {
         const item = indicatorSeriesRef.current[key];
         try {
-          if (item && typeof item.remove === 'function') {
-            item.remove();
-          } else if (item && item.series && typeof item.series.remove === 'function') {
-            item.series.remove();
-          } else if (chartRef.current && item && typeof chartRef.current.removeSeries === 'function') {
-            try { chartRef.current.removeSeries(item); } catch (e) { /* ignore */ }
-          }
+          if (chartRef.current && item) chartRef.current.removeSeries(item);
         } catch (e) {
           console.warn('Error removing indicator series', key, e);
         }
-        try { delete indicatorSeriesRef.current[key]; } catch (e) {}
+        delete indicatorSeriesRef.current[key];
       }
     });
 
-    // اگر اندیکاتور پنل مجزایی ساخته (مثل RSI/MACD) بود، چارت و کانتینرش رو پاک کن
-    try {
-      const panelsObj = indicatorsPanelsRef.current || (window.__indicatorsPanelsRef_fallback && window.__indicatorsPanelsRef_fallback.current) || {};
-      const panel = panelsObj[indicatorId];
-      if (panel) {
-        try {
-          if (panel.chart && typeof panel.chart.remove === 'function') {
-            panel.chart.remove();
-          }
-        } catch (e) { /* ignore */ }
+    const panel = indicatorsPanelsRef.current[indicatorId];
+    if (panel) {
+      disposeIndicatorPane(panel);
+      delete indicatorsPanelsRef.current[indicatorId];
+    }
+  };
 
-        try {
-          if (panel.container) {
-            // disconnect ResizeObserver if present
-            if (panel.container._resizeObserver && typeof panel.container._resizeObserver.disconnect === 'function') {
-              try { panel.container._resizeObserver.disconnect(); } catch (ee) { /* ignore */ }
-              try { delete panel.container._resizeObserver; } catch (_) { }
-            }
-            // remove from DOM
-            if (panel.container.parentElement) {
-              try { panel.container.parentElement.removeChild(panel.container); } catch (ee) { /* ignore */ }
-            } else {
-              try { panel.container.remove(); } catch (ee) { /* ignore */ }
-            }
-          }
-        } catch (e) { /* ignore */ }
+  useEffect(() => {
+    const activePaneIds = new Set(activeIndicators
+      .filter((indicator) => indicator.id === "rsi" || indicator.id === "macd")
+      .map((indicator) => indicator.id));
 
-        try { delete panelsObj[indicatorId]; } catch (e) {}
+    Object.entries(indicatorsPanelsRef.current).forEach(([indicatorId, panel]) => {
+      if (!activePaneIds.has(indicatorId)) {
+        disposeIndicatorPane(panel);
+        delete indicatorsPanelsRef.current[indicatorId];
       }
-    } catch (e) {
-      console.warn('removeIndicator: panel removal failed', e);
-    }
-
-    // notify ensureIndicatorsSync to refresh listeners / sizes
-    try {
-      // small timeout to let React update activeIndicators first
-      setTimeout(() => {
-        try {
-          if (chartRef.current && typeof chartRef.current.timeScale === 'function') {
-            const ts = chartRef.current.timeScale();
-            if (ts && typeof ts.fitContent === 'function') ts.fitContent();
-          }
-        } catch (e) { /* ignore */ }
-        try { ensureIndicatorsSync(); } catch (e) {}
-      }, 60);
-    } catch (e) { /* ignore */ }
-  };
-
-
-  // -----------------------------
-  // اجرای یکبار سینک اولیه برای هر پنل جدید
-  // -----------------------------
-  const syncIndicatorInitial = (panelChart, panelContainer) => {
-    try {
-      if (!chartRef?.current || !panelChart) return;
-
-      const mainTs = getMainTimeScaleObj();
-      if (!mainTs) return;
-
-      // copy timeScale options (best-effort)
-      try {
-        const tryApply = (srcTs, destChart) => {
-          try {
-            // بعضی ورژن‌ها applyOptions روی timeScale دارند
-            const opts = (typeof srcTs.options === 'function') ? srcTs.options() : (srcTs.options || null);
-            if (opts && destChart && destChart.timeScale && typeof destChart.timeScale().applyOptions === 'function') {
-              destChart.timeScale().applyOptions(opts);
-            }
-          } catch (e) { }
-        };
-        tryApply(mainTs, panelChart);
-      } catch (e) { }
-
-      // copy visible range (try both visibleRange and logicalRange)
-      try {
-        let vr = null;
-        if (typeof mainTs.getVisibleRange === 'function') vr = mainTs.getVisibleRange();
-        else if (typeof mainTs.getVisibleLogicalRange === 'function') vr = mainTs.getVisibleLogicalRange();
-        if (vr) {
-          applyRangeToPanel(panelChart, vr);
-        }
-      } catch (e) { }
-
-      // small timeout and resize to avoid black area / offset
-      setTimeout(() => {
-        try {
-          const cont = panelContainer || (panelChart && (panelChart._container || null));
-          if (cont && panelChart && typeof panelChart.resize === 'function') {
-            panelChart.resize((cont.clientWidth || cont.offsetWidth || 600), (cont.clientHeight || 150));
-          }
-        } catch (e) { }
-        // and re-apply visible range after resize to be safe
-        try {
-          const mainTs2 = getMainTimeScaleObj();
-          let vr2 = null;
-          if (mainTs2) {
-            if (typeof mainTs2.getVisibleRange === 'function') vr2 = mainTs2.getVisibleRange();
-            else if (typeof mainTs2.getVisibleLogicalRange === 'function') vr2 = mainTs2.getVisibleLogicalRange();
-          }
-          if (vr2) applyRangeToPanel(panelChart, vr2);
-        } catch (e) { }
-      }, 80);
-    } catch (e) {
-      // swallow
-    }
-  };
-
-
+    });
+  }, [activeIndicators]);
 
 
   // -----------------------------------------------------------------------
@@ -1325,6 +1206,32 @@ export default function ChartContainer({
       console.warn("applyOptions handleScroll/handleScale failed:", e);
     }
   };
+
+  const publishToolSelection = (tool) => {
+    window.dispatchEvent(new CustomEvent("tvmini:tool:selected", { detail: { tool } }));
+  };
+
+  const cancelDrawingOperation = () => {
+    isDrawingRef.current = false;
+    drawingMovedRef.current = false;
+    drawingPhaseRef.current = "idle";
+    drawingStateRef.current.currentDrawing = null;
+    setCurrentDrawing(null);
+    setChartInteraction(true);
+    publishToolSelection(null);
+  };
+  cancelDrawingOperationRef.current = cancelDrawingOperation;
+
+  useEffect(() => {
+    if (!activeTool) return;
+    const cancelOnEscape = (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      cancelDrawingOperationRef.current?.();
+    };
+    document.addEventListener("keydown", cancelOnEscape);
+    return () => document.removeEventListener("keydown", cancelOnEscape);
+  }, [activeTool]);
 
   // ------------------------------
   // Editing handlers
@@ -1353,8 +1260,9 @@ export default function ChartContainer({
     setSelectedId(drawing.id);
     setChartInteraction(false);
 
-    window.addEventListener("mousemove", handleEditMouseMove);
-    window.addEventListener("mouseup", handleEditMouseUp);
+    editListenersRef.current = { move: handleEditMouseMove, up: handleEditMouseUp };
+    window.addEventListener("mousemove", editListenersRef.current.move);
+    window.addEventListener("mouseup", editListenersRef.current.up);
   };
 
   const handleEditMouseMove = (ev) => {
@@ -1419,6 +1327,21 @@ export default function ChartContainer({
             next.endX = newEndX;
             next.startY = newStartY;
             next.endY = newEndY;
+            if (Array.isArray(next.points)) {
+              next.points = next.points.map((point) => {
+                const pointX = (Number.isFinite(point.x) ? point.x : 0) + dx;
+                const pointY = (Number.isFinite(point.y) ? point.y : 0) + dy;
+                const pointTime = typeof timeScale.coordinateToTime === "function" ? timeScale.coordinateToTime(pointX) : null;
+                const pointPrice = s && typeof s.coordinateToPrice === "function" ? s.coordinateToPrice(pointY) : null;
+                return {
+                  ...point,
+                  x: pointX,
+                  y: pointY,
+                  time: pointTime ?? point.time,
+                  price: pointPrice ?? point.price,
+                };
+              });
+            }
           } catch (err) {
             next.startX = newStartX;
             next.endX = newEndX;
@@ -1453,49 +1376,73 @@ export default function ChartContainer({
   const cleanupEdit = () => {
     editingRef.current = { mode: null, id: null, startMouseX: 0, startMouseY: 0, orig: null };
     setChartInteraction(true);
-    window.removeEventListener("mousemove", handleEditMouseMove);
-    window.removeEventListener("mouseup", handleEditMouseUp);
+    if (editListenersRef.current) {
+      window.removeEventListener("mousemove", editListenersRef.current.move);
+      window.removeEventListener("mouseup", editListenersRef.current.up);
+      editListenersRef.current = null;
+    }
   };
 
   // -----------------------------------------------------------------------
-  // Mouse handlers for drawing
+  // Pointer handlers for one-shot chart drawings
   // -----------------------------------------------------------------------
   useEffect(() => {
     if (!chartRef.current || !containerRef.current) return;
 
     const series = candleSeriesRef.current;
+    const drawingSurface = svgRef.current || containerRef.current;
 
-    const handleMouseDown = (e) => {
-      if (!activeTool || activeTool === "eraser") return;
-      if (e.button !== 0) return;
+    const handlePointerDown = (event) => {
+      const { activeTool: selectedTool } = drawingStateRef.current;
+      const currentDrawing = drawingStateRef.current.currentDrawing;
+      const isTwoClickTool = selectedTool === "trendline" || selectedTool === "fibonacci";
+      if (!selectedTool || selectedTool === "eraser") return;
+      if (event.button !== 0 || event.isPrimary === false) return;
+      if (isDrawingRef.current && (!isTwoClickTool || drawingPhaseRef.current !== "awaiting-end" || currentDrawing?.type !== selectedTool)) return;
 
-      const canvasRect = containerRef.current.getBoundingClientRect();
-      const canvas = containerRef.current.querySelector('canvas');
-      if (!canvas || !canvas.getBoundingClientRect) { }
-
-      const canvasRect2 = getCanvasRect();
-      if (!canvasRect2) {
+      const canvasRect = getCanvasRect();
+      if (!canvasRect) {
         console.warn("Canvas rect unavailable for drawing");
         return;
       }
 
-      const canvasX = e.clientX - canvasRect2.left;
-      const canvasY = e.clientY - canvasRect2.top;
-
-      console.log("🖱️ Mouse down at (canvas coords)", canvasX, canvasY, "with tool:", activeTool);
+      event.preventDefault();
+      const canvasX = event.clientX - canvasRect.left;
+      const canvasY = event.clientY - canvasRect.top;
 
       try {
         const timeScale = chartRef.current.timeScale();
         const time = typeof timeScale.coordinateToTime === 'function' ? timeScale.coordinateToTime(canvasX) : null;
         const price = series && typeof series.coordinateToPrice === 'function' ? series.coordinateToPrice(canvasY) : null;
-        const finalPrice = price != null ? price : lastCandle?.close ?? null;
+        const finalPrice = price;
+        const startPoint = { x: canvasX, y: canvasY, time: time ?? null, price: finalPrice };
 
+        if (isDrawingRef.current && isTwoClickTool && currentDrawing) {
+          const nextDrawing = {
+            ...currentDrawing,
+            endTime: time ?? null,
+            endPrice: price ?? null,
+            endX: canvasX,
+            endY: canvasY,
+          };
+
+          drawingPhaseRef.current = "finishing";
+          drawingMovedRef.current = true;
+
+          // Preserve the exact position of the second click.
+          drawingStateRef.current.currentDrawing = nextDrawing;
+          setCurrentDrawing(nextDrawing);
+
+          return;
+        }
+
+        drawingMovedRef.current = false;
+        drawingPhaseRef.current = isTwoClickTool ? "awaiting-end" : "dragging";
         if (time != null && finalPrice != null) {
           setChartInteraction(false);
-
           isDrawingRef.current = true;
           const newDrawing = {
-            type: activeTool,
+            type: selectedTool,
             startTime: time,
             startPrice: finalPrice,
             endTime: time,
@@ -1506,14 +1453,15 @@ export default function ChartContainer({
             endY: canvasY,
             id: Date.now(),
             createdAt: Date.now(),
+            ...(selectedTool === "brush" ? { points: [startPoint] } : {}),
           };
+          drawingStateRef.current.currentDrawing = newDrawing;
           setCurrentDrawing(newDrawing);
-          console.log("✏️ Started drawing:", newDrawing);
         } else {
           setChartInteraction(false);
           isDrawingRef.current = true;
           const newDrawing = {
-            type: activeTool,
+            type: selectedTool,
             id: Date.now(),
             createdAt: Date.now(),
             startTime: time ?? null,
@@ -1524,51 +1472,78 @@ export default function ChartContainer({
             startY: canvasY,
             endX: canvasX,
             endY: canvasY,
+            ...(selectedTool === "brush" ? { points: [startPoint] } : {}),
           };
+          drawingStateRef.current.currentDrawing = newDrawing;
           setCurrentDrawing(newDrawing);
-          console.log("✏️ Started pixel-only drawing (fallback):", newDrawing);
         }
+        try { drawingSurface.setPointerCapture(event.pointerId); } catch (error) { console.warn("Pointer capture unavailable:", error); }
       } catch (err) {
-        console.error("❌ Error in mouseDown:", err);
+        console.error("Error starting drawing:", err);
       }
     };
 
-    const handleMouseMove = (e) => {
+    const handlePointerMove = (event) => {
+      const currentDrawing = drawingStateRef.current.currentDrawing;
       if (!isDrawingRef.current || !currentDrawing) return;
 
       const canvasRect = getCanvasRect();
       if (!canvasRect) return;
-      const canvasX = e.clientX - canvasRect.left;
-      const canvasY = e.clientY - canvasRect.top;
+      const canvasX = event.clientX - canvasRect.left;
+      const canvasY = event.clientY - canvasRect.top;
+      const distanceX = canvasX - currentDrawing.startX;
+      const distanceY = canvasY - currentDrawing.startY;
+      if (currentDrawing.type === "rectangle") {
+        drawingMovedRef.current = Math.abs(distanceX) > 3 && Math.abs(distanceY) > 3;
+      } else if (Math.hypot(distanceX, distanceY) > 3) {
+        drawingMovedRef.current = true;
+      }
 
       try {
         const timeScale = chartRef.current.timeScale();
         const time = typeof timeScale.coordinateToTime === 'function' ? timeScale.coordinateToTime(canvasX) : null;
         const price = series && typeof series.coordinateToPrice === 'function' ? series.coordinateToPrice(canvasY) : null;
-
-        if (time != null && price != null) {
-          setCurrentDrawing((prev) => ({ ...prev, endTime: time, endPrice: price, endX: canvasX, endY: canvasY }));
-        } else {
-          setCurrentDrawing((prev) => ({ ...prev, endX: canvasX, endY: canvasY }));
-        }
+        const point = { x: canvasX, y: canvasY, time: time ?? null, price: price ?? null };
+        setCurrentDrawing((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev, endTime: time ?? prev.endTime, endPrice: price ?? prev.endPrice, endX: canvasX, endY: canvasY };
+          if (prev.type === "brush") {
+            const points = prev.points || [];
+            const lastPoint = points[points.length - 1];
+            if (!lastPoint || Math.hypot(canvasX - lastPoint.x, canvasY - lastPoint.y) >= 2) {
+              next.points = [...points, point];
+            }
+          }
+          drawingStateRef.current.currentDrawing = next;
+          return next;
+        });
       } catch (err) {
-        console.warn("⚠️ Error in mouseMove:", err);
+        console.warn("Error updating drawing preview:", err);
       }
     };
 
-    const handleMouseUp = (e) => {
-      if (e && e.button != null && e.button !== 0) return;
-
+    const handlePointerUp = () => {
+      const currentDrawing = drawingStateRef.current.currentDrawing;
       if (isDrawingRef.current && currentDrawing) {
+        const isSingleAction = currentDrawing.type === "hline";
+        const isTwoClickTool = currentDrawing.type === "trendline" || currentDrawing.type === "fibonacci";
+        if (isTwoClickTool && drawingPhaseRef.current === "awaiting-end") return;
+        const completedBySecondClick = isTwoClickTool && drawingPhaseRef.current === "finishing";
+        const enoughBrushPoints = currentDrawing.type !== "brush" || (currentDrawing.points?.length || 0) > 1;
+        if ((!isSingleAction && !completedBySecondClick && !drawingMovedRef.current) || !enoughBrushPoints) {
+          cancelDrawingOperationRef.current?.();
+          return;
+        }
+
         try {
           const timeScale = chartRef.current.timeScale();
           const s = candleSeriesRef.current;
 
-          const finalStartX = typeof timeScale.timeToCoordinate === 'function' && currentDrawing.startTime != null ? timeScale.timeToCoordinate(currentDrawing.startTime) : currentDrawing.startX;
-          const finalEndX = typeof timeScale.timeToCoordinate === 'function' && currentDrawing.endTime != null ? timeScale.timeToCoordinate(currentDrawing.endTime) : currentDrawing.endX;
+          const finalStartX = currentDrawing.startX;
+          const finalStartY = currentDrawing.startY;
 
-          const finalStartY = s && typeof s.priceToCoordinate === 'function' && currentDrawing.startPrice != null ? s.priceToCoordinate(currentDrawing.startPrice) : currentDrawing.startY;
-          const finalEndY = s && typeof s.priceToCoordinate === 'function' && currentDrawing.endPrice != null ? s.priceToCoordinate(currentDrawing.endPrice) : currentDrawing.endY;
+          const finalEndX = currentDrawing.endX;
+          const finalEndY = currentDrawing.endY;
 
           const inner = getChartInnerSize();
           const width = inner.width;
@@ -1593,52 +1568,63 @@ export default function ChartContainer({
               finished.endY = currentDrawing.startY;
             }
           }
+          if (Array.isArray(finished.points)) {
+            finished.points = finished.points.map((point) => ({
+              ...point,
+              x: point.time != null ? (timeScale.timeToCoordinate(point.time) ?? point.x) : point.x,
+              y: point.price != null ? (s.priceToCoordinate(point.price) ?? point.y) : point.y,
+            }));
+          }
 
           setDrawings((prev) => {
             const next = [...prev, finished];
-            persistDrawings(next);
+            persistDrawingsRef.current(next);
             return next;
           });
           setCurrentDrawing(null);
+          drawingStateRef.current.currentDrawing = null;
           isDrawingRef.current = false;
+          drawingMovedRef.current = false;
+          drawingPhaseRef.current = "idle";
 
           setSelectedId(finished.id);
 
           setChartInteraction(true);
-
-          console.log("✅ Finished drawing (with pixel coords):", finished);
+          publishToolSelection(null);
         } catch (err) {
-          console.error("❌ Error finalizing drawing:", err);
+          console.error("Error finalizing drawing:", err);
           setDrawings((prev) => {
             const next = [...prev, { ...currentDrawing, id: Date.now() }];
-            persistDrawings(next);
+            persistDrawingsRef.current(next);
             return next;
           });
           setCurrentDrawing(null);
+          drawingStateRef.current.currentDrawing = null;
           isDrawingRef.current = false;
+          drawingMovedRef.current = false;
+          drawingPhaseRef.current = "idle";
           setChartInteraction(true);
+          publishToolSelection(null);
         }
       }
     };
 
-    const container = containerRef.current;
-    container.addEventListener("mousedown", handleMouseDown);
+    const handlePointerCancel = () => {
+      if (isDrawingRef.current) cancelDrawingOperationRef.current?.();
+    };
 
-    const svgEl = svgRef.current;
-    if (svgEl) {
-      svgEl.addEventListener("mousedown", handleMouseDown);
-    }
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
+    drawingSurface.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerCancel);
 
     return () => {
-      container.removeEventListener("mousedown", handleMouseDown);
-      if (svgEl) svgEl.removeEventListener("mousedown", handleMouseDown);
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
+      drawingSurface.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerCancel);
     };
-  }, [activeTool, currentDrawing, lastCandle, drawings]);
+  }, []);
 
   // -----------------------------------------------------------------------
   // Update drawing coordinates when chart updates
@@ -1672,24 +1658,17 @@ export default function ChartContainer({
               return { ...drawing, startX: left, startY: y1, endX: left + Math.max(0, width), endY: y1 };
             }
 
-            return { ...drawing, startX: x1, startY: y1, endX: x2, endY: y2 };
+            const points = Array.isArray(drawing.points)
+              ? drawing.points.map((point) => {
+                const pointX = point.time != null ? timeScale.timeToCoordinate(point.time) : null;
+                const pointY = point.price != null && s ? s.priceToCoordinate(point.price) : null;
+                return { ...point, x: pointX ?? point.x, y: pointY ?? point.y };
+              })
+              : drawing.points;
+            return { ...drawing, startX: x1, startY: y1, endX: x2, endY: y2, points };
           })
         );
 
-        if (currentDrawing) {
-          const x1 = typeof timeScale.timeToCoordinate === 'function' ? (currentDrawing.startTime != null ? timeScale.timeToCoordinate(currentDrawing.startTime) : currentDrawing.startX) : currentDrawing.startX;
-          const y1 = s && typeof s.priceToCoordinate === 'function' ? (currentDrawing.startPrice != null ? s.priceToCoordinate(currentDrawing.startPrice) : currentDrawing.startY) : currentDrawing.startY;
-          const x2 = typeof timeScale.timeToCoordinate === 'function' ? (currentDrawing.endTime != null ? timeScale.timeToCoordinate(currentDrawing.endTime) : currentDrawing.endX) : currentDrawing.endX;
-          const y2 = s && typeof s.priceToCoordinate === 'function' ? (currentDrawing.endPrice != null ? s.priceToCoordinate(currentDrawing.endPrice) : currentDrawing.endY) : currentDrawing.endY;
-
-          if (x1 != null && y1 != null && x2 != null && y2 != null) {
-            if (currentDrawing.type === "hline") {
-              setCurrentDrawing((prev) => ({ ...prev, startX: left, startY: y1, endX: left + Math.max(0, width), endY: y1 }));
-            } else {
-              setCurrentDrawing((prev) => ({ ...prev, startX: x1, startY: y1, endX: x2, endY: y2 }));
-            }
-          }
-        }
       } catch (err) {
         console.warn("Error updating drawing coordinates:", err);
       }
@@ -1706,7 +1685,7 @@ export default function ChartContainer({
         chartRef.current?.timeScale().unsubscribeVisibleLogicalRangeChange(updateDrawings);
       } catch (e) { }
     };
-  }, [currentDrawing]);
+  }, []);
 
   // -----------------------------------------------------------------------
   // Render SVG drawings helper
@@ -1963,41 +1942,41 @@ export default function ChartContainer({
           );
         }
 
-        case "brush":
+        case "brush": {
+          const brushPoints = drawing.points?.length > 1
+            ? drawing.points.map((point) => `${point.x},${point.y}`).join(" ")
+            : `${startX},${startY} ${endX},${endY}`;
           return (
             <g key={key}>
-              <line
-                x1={startX}
-                y1={startY}
-                x2={endX}
-                y2={endY}
+              <polyline
+                points={brushPoints}
                 stroke="transparent"
                 strokeWidth={16}
                 strokeLinecap="round"
+                strokeLinejoin="round"
+                fill="none"
                 onMouseDown={onShapeMouseDown}
                 style={{ pointerEvents: "auto", cursor: "move" }}
               />
               {isSelected && (
-                <line
-                  x1={startX}
-                  y1={startY}
-                  x2={endX}
-                  y2={endY}
+                <polyline
+                  points={brushPoints}
                   stroke="#00ff7f"
                   strokeWidth={8}
+                  strokeLinejoin="round"
                   strokeLinecap="round"
+                  fill="none"
                   opacity={0.3}
                   style={{ pointerEvents: "none" }}
                 />
               )}
-              <line
-                x1={startX}
-                y1={startY}
-                x2={endX}
-                y2={endY}
+              <polyline
+                points={brushPoints}
                 stroke={isSelected ? "#00ff7f" : "#ff00ff"}
                 strokeWidth={3}
+                strokeLinejoin="round"
                 strokeLinecap="round"
+                fill="none"
                 style={{ pointerEvents: "none" }}
               />
               {isSelected && (
@@ -2005,6 +1984,7 @@ export default function ChartContainer({
               )}
             </g>
           );
+        }
 
         default:
           return null;
@@ -2020,6 +2000,7 @@ export default function ChartContainer({
     let cancelled = false;
     setLoading(true);
     setFade(true);
+    setChartError("");
 
     const loadCandles = async () => {
       try {
@@ -2028,9 +2009,12 @@ export default function ChartContainer({
             ? await api.getCryptoKlines(symbol, interval, 500)
             : await api.getForexKlines(symbol, interval, 500);
 
-        const rawCandles = res?.data?.candles ?? res?.data?.data ?? [];
-        if (!rawCandles || !rawCandles.length) {
-          console.warn("No candle data returned for", symbol, interval, "response:", res?.data);
+        if (cancelled) return;
+        const rawCandles = res?.data?.candles ?? res?.data?.data;
+        if (!Array.isArray(rawCandles)) {
+          throw new Error("The chart response did not contain a candle list.");
+        }
+        if (rawCandles.length === 0) {
           candleSeriesRef.current.setData([]);
           setLastCandle(null);
           setCandlesData([]);
@@ -2042,6 +2026,7 @@ export default function ChartContainer({
           candleSeriesRef.current.setData([]);
           setLastCandle(null);
           setCandlesData([]);
+          setChartError("The chart response contained no valid candles.");
           return;
         }
 
@@ -2055,6 +2040,7 @@ export default function ChartContainer({
             candleSeriesRef.current.setData([]);
             setLastCandle(null);
             setCandlesData([]);
+            setChartError("The chart response contained invalid candle times.");
             return;
           }
           if (normalized[i].time <= normalized[i - 1].time) {
@@ -2066,6 +2052,7 @@ export default function ChartContainer({
           candleSeriesRef.current.setData(normalized);
           setLastCandle(normalized.at(-1));
           setCandlesData(normalized);
+          setChartError("");
         } catch (err) {
           console.error("Failed to setData on series (chart assertion). Dumping head/tail + attempting fallback:", err, {
             head: normalized.slice(0, 6),
@@ -2078,24 +2065,31 @@ export default function ChartContainer({
             candleSeriesRef.current.setData(lastChunk);
             setLastCandle(lastChunk.at(-1));
             setCandlesData(lastChunk);
+            setChartError("");
           } catch (err2) {
             console.error("Fallback setData also failed:", err2);
             candleSeriesRef.current.setData([]);
             setLastCandle(null);
             setCandlesData([]);
+            setChartError("Unable to render the chart data.");
           }
         }
       } catch (err) {
         console.error("Error loading candles:", err);
+        if (cancelled) return;
         try {
           candleSeriesRef.current.setData([]);
         } catch (e) { }
         setLastCandle(null);
         setCandlesData([]);
+        setChartError(requestErrorMessage(err, "Unable to load chart data."));
       } finally {
         if (!cancelled) {
           setLoading(false);
-          setTimeout(() => setFade(false), 300);
+          clearTimeout(fadeTimeoutRef.current);
+          fadeTimeoutRef.current = setTimeout(() => {
+            if (!cancelled) setFade(false);
+          }, 300);
         }
       }
     };
@@ -2109,8 +2103,9 @@ export default function ChartContainer({
 
     return () => {
       cancelled = true;
+      clearTimeout(fadeTimeoutRef.current);
     };
-  }, [symbol, marketType, interval]);
+  }, [symbol, marketType, interval, chartRetry]);
 
   // -----------------------------------------------------------------------
   // When candlesData or chart become available, ensure drawings are projected
@@ -2122,7 +2117,8 @@ export default function ChartContainer({
       if (!needProjection) return prev;
       isRestoringRef.current = true;
       const projected = projectDrawingsToPixels(prev);
-      setTimeout(() => { isRestoringRef.current = false; }, 300);
+      clearTimeout(restoringTimeoutRef.current);
+      restoringTimeoutRef.current = setTimeout(() => { isRestoringRef.current = false; }, 300);
       return projected;
     });
   }, [candlesData]);
@@ -2148,82 +2144,52 @@ export default function ChartContainer({
     return () => clearInterval(id);
   }, [lastCandle, interval]);
 
+  useEffect(() => {
+    onLivePrice?.(latestPrice);
+  }, [latestPrice, onLivePrice]);
+
   // -----------------------------------------------------------------------
   // Live update
   // -----------------------------------------------------------------------
   useEffect(() => {
-    if (!lastCandle) return;
     let cancelled = false;
-    const intervalSec = intervalToSeconds(interval);
+    let timeoutId;
+    const controller = new AbortController();
+    setLatestPrice(null);
+    setLatestPriceError("");
 
     const updateLatest = async () => {
+      setLatestPriceLoading(true);
       try {
-        const res = await api.getLatestPrice(marketType, symbol);
+        const res = await api.getLatestPrice(marketType, symbol, controller.signal);
         const priceRaw = res?.data?.price;
-        if (priceRaw == null) return;
-
         const price = Number(priceRaw);
-        if (!Number.isFinite(price)) return;
-
-        let priceTsSec = null;
-        if (res.data?.timestamp) {
-          const t = Number(res.data.timestamp);
-          if (!Number.isNaN(t)) priceTsSec = t > 1e12 ? Math.floor(t / 1000) : Math.floor(t);
+        if (!Number.isFinite(price) || price <= 0) {
+          throw new Error("The latest-price response did not contain a valid price.");
         }
-        if (!priceTsSec) priceTsSec = Math.floor(Date.now() / 1000);
-
         if (cancelled) return;
-        if (!lastCandle || !candleSeriesRef.current) return;
-
-        const priceBucketStart = Math.floor(priceTsSec / intervalSec) * intervalSec;
-        const lastBucketStart = Math.floor(lastCandle.time / intervalSec) * intervalSec;
-
-        if (priceBucketStart > lastBucketStart) {
-          const newCandle = {
-            time: priceBucketStart,
-            open: lastCandle.close,
-            high: Math.max(lastCandle.close, price),
-            low: Math.min(lastCandle.close, price),
-            close: price,
-          };
-          try {
-            candleSeriesRef.current.update(newCandle);
-            setLastCandle(newCandle);
-            setCandlesData((prev) => [...prev, newCandle]);
-          } catch (err) {
-            console.warn("Update for new bucket failed", err);
-          }
-        } else {
-          const updated = {
-            ...lastCandle,
-            close: price,
-            high: Math.max(lastCandle.high, price),
-            low: Math.min(lastCandle.low, price),
-          };
-          try {
-            candleSeriesRef.current.update(updated);
-            setLastCandle(updated);
-            setCandlesData((prev) => {
-              const newData = [...prev];
-              newData[newData.length - 1] = updated;
-              return newData;
-            });
-          } catch (err) {
-            console.warn("Update for current bucket failed:", err);
-          }
-        }
+        setLatestPrice(price);
+        setLatestPriceError("");
       } catch (err) {
-        console.warn("Latest price fetch failed:", err);
+        if (!cancelled) {
+          console.error("Latest price fetch failed:", err);
+          setLatestPriceError(requestErrorMessage(err, "Unable to load the latest price."));
+        }
+      } finally {
+        if (!cancelled) {
+          setLatestPriceLoading(false);
+          timeoutId = setTimeout(updateLatest, 10000);
+        }
       }
     };
 
     updateLatest();
-    const id = setInterval(updateLatest, 10000);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      clearTimeout(timeoutId);
+      controller.abort();
     };
-  }, [lastCandle, marketType, symbol, interval]);
+  }, [marketType, symbol, interval, latestPriceRetry]);
 
   const priceColor = lastCandle
     ? lastCandle.close >= lastCandle.open
@@ -2300,6 +2266,7 @@ export default function ChartContainer({
     const onBackgroundClick = (e) => {
       if (isDrawingRef.current) return;
       if (editingRef.current && editingRef.current.id) return;
+      if (svgRef.current?.contains(e.target)) return;
       setSelectedId(null);
     };
     window.addEventListener("click", onBackgroundClick);
@@ -2311,142 +2278,192 @@ export default function ChartContainer({
   // -----------------------------------------------------------------------
   return (
     <div
-      className={`flex-1 flex flex-col h-full border border-gray-800 bg-[#0b0f14] rounded-lg overflow-hidden transition-opacity duration-300 ${fade ? "opacity-40" : "opacity-100"
+      className={`relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg border border-gray-800 bg-[#0b0f14] transition-opacity duration-300 ${fade ? "opacity-40" : "opacity-100"
         }`}
     >
-      <ChartToolbar onShowIndicators={() => setShowIndicatorModal(true)} />
-
       <IndicatorModal isOpen={showIndicatorModal} onClose={() => setShowIndicatorModal(false)} />
 
-      <div className="p-3 bg-[#071017] border-b border-gray-800 text-gray-300 flex items-center justify-between">
-        <div className="flex items-center gap-2 flex-wrap">
-          <strong>{symbol}</strong>
-          <span className="text-sm text-gray-400">• {marketType} • {interval}</span>
-          {/* {activeTool && (
-            <span className="ml-2 text-xs px-2 py-1 bg-[#00ff7f]/20 text-[#00ff7f] rounded">🔧 {activeTool}</span>
-          )} */}
-          {/* indicator badges could go here */}
+      <div className="flex shrink-0 flex-col gap-2 border-b border-gray-800 bg-[#071017] p-3 text-gray-200">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <strong className="break-all text-sm sm:text-base">{symbol}</strong>
+            <span className="text-sm text-gray-300">• {marketType} • {interval}</span>
+          </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+            <div className="max-w-full break-words" role={chartError || latestPriceError ? "alert" : undefined}>
+              {loading ? "Loading chart..." : chartError ? (
+                <span className="text-red-300">
+                  Chart unavailable: {chartError}{" "}
+                  <button type="button" onClick={() => setChartRetry((retry) => retry + 1)} className="min-h-9 rounded px-2 underline focus-visible:outline">Retry chart</button>
+                </span>
+              ) : lastCandle ? (
+                <span className={priceColor}>Candle close: {lastCandle.close.toFixed(4)}</span>
+              ) : "No candle data"}
+            </div>
+            <div className="max-w-full break-words">
+              {latestPriceError ? (
+                <span className="text-red-300" role="alert">
+                  Live price unavailable: {latestPriceError}{" "}
+                  <button type="button" onClick={() => setLatestPriceRetry((retry) => retry + 1)} className="min-h-9 rounded px-2 underline focus-visible:outline">Retry live price</button>
+                </span>
+              ) : latestPriceLoading && latestPrice == null ? (
+                "Live: Loading..."
+              ) : latestPrice != null ? (
+                <span>Live: {latestPrice.toFixed(4)}</span>
+              ) : "Live: —"}
+            </div>
+            <div aria-label="Time until candle closes">{remainingSec != null ? `⏱️ ${formatRemaining(remainingSec)}` : "–"}</div>
+          </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => {
-              console.log("📊 Opening indicator modal");
-              setShowIndicatorModal(true);
-            }}
-            className="px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded transition-colors"
-          >
-            + Indicators
-          </button>
-
-          <div style={{ position: 'relative' }}>
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-gray-800 pt-2">
+          <ChartToolbar onShowIndicators={() => setShowIndicatorModal(true)} />
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             <button
-              onClick={() => setShowManageIndicators(s => !s)}
-              className="ml-2 px-3 py-1 bg-gray-800/80 text-xs rounded border border-gray-700 hover:bg-gray-700/20"
+              type="button"
+              onClick={() => {
+                setShowIndicatorModal(true);
+              }}
+              className="min-h-10 rounded border border-blue-500 bg-blue-700 px-3 py-2 text-xs text-white hover:bg-blue-600"
             >
-              ⚙️ Manage indicators
+              Add indicator
             </button>
-            {showManageIndicators && (
-              <div
-                className="bg-[#071017] border border-gray-700 rounded p-2 text-xs text-gray-200"
-                style={{
-                  position: 'absolute',
-                  top: '100%',
-                  right: 0,
-                  marginTop: '8px',
-                  minWidth: 260,
-                  maxWidth: 360,
-                  zIndex: 10002,
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+
+            <div className="relative">
+              <button
+                type="button"
+                onClick={(event) => {
+                  if (showManageIndicators) {
+                    setShowManageIndicators(false);
+                    setMenuPosition(null);
+                  } else {
+                    setShowManageDrawings(false);
+                    setShowManageIndicators(true);
+                    positionManagementMenu(event, 360);
+                  }
                 }}
+                className="min-h-10 rounded border border-gray-600 bg-gray-800 px-3 py-2 text-xs text-gray-100 hover:bg-gray-700"
+                aria-expanded={showManageIndicators}
+                aria-controls="manage-indicators-menu"
               >
-                <div className="flex items-center justify-between mb-2">
-                  <strong className="text-sm">Indicators</strong>
-                  <div>
-                    <button onClick={() => setShowManageIndicators(false)} className="ml-2 px-2 py-0.5 rounded hover:bg-gray-700/20">Close</button>
+                Manage indicators
+              </button>
+              {showManageIndicators && (
+                <div
+                  id="manage-indicators-menu"
+                  role="region"
+                  aria-label="Manage indicators"
+                  className="bg-[#071017] border border-gray-700 rounded p-2 text-xs text-gray-200"
+                  style={{
+                    position: menuPosition ? 'fixed' : 'absolute',
+                    top: menuPosition?.top ?? '100%',
+                    right: menuPosition?.right ?? 0,
+                    marginTop: menuPosition ? 0 : '8px',
+                    width: menuPosition?.width ?? 'min(360px, calc(100vw - 32px))',
+                    zIndex: 10002,
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <strong className="text-sm">Indicators</strong>
+                    <div>
+                      <button type="button" onClick={() => { setShowManageIndicators(false); setMenuPosition(null); }} className="min-h-9 rounded px-2 py-1 hover:bg-gray-700">Close</button>
+                    </div>
+                  </div>
+
+                  <div style={{ maxHeight: 260, overflow: "auto" }}>
+                    {activeIndicators.length === 0 && <div className="text-gray-400">No indicators added</div>}
+                    {activeIndicators.map(ind => (
+                      <div key={ind.id} className="flex items-center justify-between bg-[#0b1114] p-1 rounded mb-1">
+                        <div>
+                          <div className="text-xs font-medium">{ind.name} {ind.defaultParams ? `(${Object.values(ind.defaultParams).join(',')})` : ''}</div>
+                          <div className="text-[10px] text-gray-400">{ind.description || ind.id}</div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => {
+                              try { removeIndicator(ind.id); } catch (e) { console.warn(e); }
+                            }}
+                            className="min-h-9 rounded px-2 py-1 text-red-300 hover:bg-red-600/10"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
+              )}
+            </div>
 
-                <div style={{ maxHeight: 260, overflow: "auto" }}>
-                  {activeIndicators.length === 0 && <div className="text-gray-400">No indicators added</div>}
-                  {activeIndicators.map(ind => (
-                    <div key={ind.id} className="flex items-center justify-between bg-[#0b1114] p-1 rounded mb-1">
-                      <div>
-                        <div className="text-xs font-medium">{ind.name} {ind.defaultParams ? `(${Object.values(ind.defaultParams).join(',')})` : ''}</div>
-                        <div className="text-[10px] text-gray-400">{ind.description || ind.id}</div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          onClick={() => {
-                            try { removeIndicator(ind.id); } catch (e) { console.warn(e); }
-                          }}
-                          className="text-red-400 px-2 py-0.5 rounded hover:bg-red-600/10"
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-
-          <div style={{ position: 'relative' }}>
-            <button onClick={() => setShowManageDrawings(s => !s)} className="px-3 py-1 bg-gray-800/80 text-xs rounded border border-gray-700 hover:bg-gray-700/20">
-              ✏️ Manage drawings
-            </button>
-            {showManageDrawings && (
-              <div
-                className="bg-[#071017] border border-gray-700 rounded p-2 text-xs text-gray-200"
-                style={{
-                  position: 'absolute',
-                  top: '100%',
-                  right: 0,
-                  marginTop: '8px',
-                  minWidth: 260,
-                  maxWidth: 320,
-                  zIndex: 10002,
-                  boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+            <div className="relative">
+              <button
+                type="button"
+                onClick={(event) => {
+                  if (showManageDrawings) {
+                    setShowManageDrawings(false);
+                    setMenuPosition(null);
+                  } else {
+                    setShowManageIndicators(false);
+                    setShowManageDrawings(true);
+                    positionManagementMenu(event, 320);
+                  }
                 }}
+                className="min-h-10 rounded border border-gray-600 bg-gray-800 px-3 py-2 text-xs text-gray-100 hover:bg-gray-700"
+                aria-expanded={showManageDrawings}
+                aria-controls="manage-drawings-menu"
               >
-                <div className="flex items-center justify-between mb-2">
-                  <strong className="text-sm">Drawings</strong>
-                  <div>
-                    <button onClick={() => clearAllDrawings()} className="text-red-400 px-2 py-0.5 rounded hover:bg-red-600/10">Clear all</button>
-                    <button onClick={() => setShowManageDrawings(false)} className="ml-2 px-2 py-0.5 rounded hover:bg-gray-700/20">Close</button>
+                Manage drawings
+              </button>
+              {showManageDrawings && (
+                <div
+                  id="manage-drawings-menu"
+                  role="region"
+                  aria-label="Manage drawings"
+                  className="bg-[#071017] border border-gray-700 rounded p-2 text-xs text-gray-200"
+                  style={{
+                    position: menuPosition ? 'fixed' : 'absolute',
+                    top: menuPosition?.top ?? '100%',
+                    right: menuPosition?.right ?? 0,
+                    marginTop: menuPosition ? 0 : '8px',
+                    width: menuPosition?.width ?? 'min(320px, calc(100vw - 32px))',
+                    zIndex: 10002,
+                    boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <strong className="text-sm">Drawings</strong>
+                    <div>
+                      <button type="button" onClick={() => clearAllDrawings()} className="min-h-9 rounded px-2 py-1 text-red-300 hover:bg-red-600/10">Clear all</button>
+                      <button type="button" onClick={() => { setShowManageDrawings(false); setMenuPosition(null); }} className="ml-2 min-h-9 rounded px-2 py-1 hover:bg-gray-700">Close</button>
+                    </div>
+                  </div>
+                  <div style={{ maxHeight: 260, overflow: "auto" }}>
+                    {drawings.length === 0 && <div className="text-gray-400">No drawings</div>}
+                    {drawings.map(d => (
+                      <div key={d.id} className="flex items-center justify-between bg-[#0b1114] p-1 rounded mb-1">
+                        <div>
+                          <div className="text-xs">{d.type}</div>
+                          <div className="text-[10px] text-gray-400">id: {d.id}</div>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button type="button" onClick={() => removeDrawing(d.id)} className="min-h-9 rounded px-2 py-1 text-red-300 hover:bg-red-600/10">Delete</button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
-                <div style={{ maxHeight: 260, overflow: "auto" }}>
-                  {drawings.length === 0 && <div className="text-gray-400">No drawings</div>}
-                  {drawings.map(d => (
-                    <div key={d.id} className="flex items-center justify-between bg-[#0b1114] p-1 rounded mb-1">
-                      <div>
-                        <div className="text-xs">{d.type}</div>
-                        <div className="text-[10px] text-gray-400">id: {d.id}</div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button onClick={() => removeDrawing(d.id)} className="text-red-400 px-2 py-0.5 rounded hover:bg-red-600/10">Delete</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
 
-          <div className="text-xs text-gray-400">
-            {loading ? "Loading..." : lastCandle ? <span className={priceColor}>C: {lastCandle.close.toFixed(4)}</span> : "No data"}
           </div>
-
-          <div className="text-xs text-gray-400">{remainingSec != null ? `⏱️ ${formatRemaining(remainingSec)}` : "–"}</div>
         </div>
       </div>
 
       {/* Container اصلی با فضای کافی برای indicator panels */}
-      <div className="flex-1 flex flex-col overflow-auto p-2 gap-2">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-auto p-2">
         {/* چارت اصلی */}
-        <div className="relative" style={{ minHeight: '400px', flex: '1 1 auto' }}>
+        <div className="relative min-h-[320px] min-w-0 flex-1">
           <div ref={containerRef} className="absolute inset-0" />
           <svg
             ref={svgRef}
@@ -2454,8 +2471,18 @@ export default function ChartContainer({
             width="100%"
             height="100%"
             preserveAspectRatio="none"
-            style={{ zIndex: 1, pointerEvents: "auto" }}
+            style={{ zIndex: 20, pointerEvents: activeTool ? "auto" : "none", cursor: activeTool ? "crosshair" : undefined }}
           >
+            {activeTool && (
+              <rect
+                x="0"
+                y="0"
+                width="100%"
+                height="100%"
+                fill="transparent"
+                style={{ pointerEvents: "all" }}
+              />
+            )}
             {renderDrawings()}
           </svg>
         </div>

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import Sidebar from "../components/Sidebar";
 import Header from "../components/Header";
 import ChartContainer from "../components/ChartContainer";
@@ -10,14 +10,26 @@ export default function Dashboard() {
   const [market, setMarket] = useState("crypto");
   const [symbol, setSymbol] = useState("BTCUSDT");
   const [interval, setInterval] = useState("1h");
+  const [activePrice, setActivePrice] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [activePanel, setActivePanel] = useState("chart");
 
-  // کنترل modal جستجو
   const [searchOpen, setSearchOpen] = useState(false);
+  const searchButtonRef = useRef(null);
+
+  const selectPanel = (panel) => {
+    if (panel !== activePanel) {
+      window.dispatchEvent(new CustomEvent("tvmini:tool:selected", { detail: { tool: null } }));
+    }
+    setActivePanel(panel);
+  };
 
   const handleSelect = (type, sym) => {
+    window.dispatchEvent(new CustomEvent("tvmini:tool:selected", { detail: { tool: null } }));
     setMarket(type);
     setSymbol(sym);
+    setActivePrice(null);
+    setActivePanel("chart");
     setSearchOpen(false);
   };
 
@@ -31,61 +43,85 @@ export default function Dashboard() {
   }, [sidebarOpen]);
 
   return (
-    <div className="min-h-screen w-full flex flex-col bg-gradient-to-b from-[#0a0e12] to-[#10151b] text-gray-100 rtl transition-colors duration-700">
-      {/* Header */}
+    <div className="min-h-dvh w-full max-w-full flex flex-col overflow-x-hidden bg-[#0a0e12] text-gray-100 rtl">
       <Header
-        onToggleSidebar={() => setSidebarOpen((s) => !s)}
+        searchButtonRef={searchButtonRef}
+        onToggleSidebar={() => {
+          if (window.matchMedia("(min-width: 1024px)").matches) {
+            setSidebarOpen((isOpen) => !isOpen);
+          } else {
+            selectPanel(activePanel === "watchlist" ? "chart" : "watchlist");
+          }
+        }}
         onOpenSearch={() => setSearchOpen(true)}
       />
 
-      {/* SymbolPicker modal */}
       <SymbolPicker
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
-        onSelect={(type, sym) => handleSelect(type, sym)}
+        onSelect={handleSelect}
+        selectedSymbol={symbol}
+        selectedMarket={market}
       />
 
-      {/* Top Info Bar */}
-      <div className="px-4 py-3 flex items-center gap-4 bg-[#0c131a]/70 border-b border-gray-800 backdrop-blur-md text-sm transition-all duration-500">
-        <div className="text-gray-300 tracking-wide">
-          <strong className="text-white font-semibold">{symbol}</strong>{" "}
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-gray-800 bg-[#0c131a] px-3 py-2 text-sm sm:px-4">
+        <div className="min-w-0 text-gray-300">
+          <strong className="font-semibold text-white">{symbol}</strong>{" "}
           <span className="text-xs text-gray-400">• {market}</span>
         </div>
-        <div className="ml-4">
+        <div className="w-full min-w-0 sm:w-auto">
           <IntervalSelector value={interval} onChange={setInterval} />
         </div>
       </div>
 
-      {/* Body */}
-      <div className="flex-1 flex overflow-hidden">
+      <nav aria-label="Workspace panels" className="grid grid-cols-3 gap-1 border-b border-gray-800 bg-[#0b0f14] p-2 lg:hidden">
+        {[
+          ["chart", "Chart"],
+          ["watchlist", "Watchlist"],
+          ["notes", "Notes"],
+        ].map(([panel, label]) => (
+          <button
+            key={panel}
+            type="button"
+            aria-pressed={activePanel === panel}
+            onClick={() => selectPanel(panel)}
+            className={`min-h-11 rounded px-3 py-2 text-sm ${activePanel === panel ? "border border-sky-400 bg-[#14212b] text-white" : "border border-gray-700 bg-[#0b0f14] text-gray-300 hover:bg-gray-800"}`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+      <div className="flex min-h-0 w-full min-w-0 flex-1 overflow-hidden">
         <div
-          className={`transition-all duration-500 ease-in-out transform ${
-            sidebarOpen ? "translate-x-0 opacity-100 w-64" : "-translate-x-72 opacity-0 w-64"
-          } bg-[#0b1016] border-r border-gray-800 shadow-inner`}
-          style={{ overflow: "hidden" }}
+          className={`${activePanel === "watchlist" ? "flex" : "hidden"} ${sidebarOpen ? "lg:flex lg:w-56" : "lg:hidden"} w-full min-w-0 flex-none overflow-hidden border-r border-gray-800 bg-[#0b1016]`}
         >
-          <div className="h-full">
+          <div className="h-full w-full min-w-0">
             <Sidebar
               onSelectSymbol={handleSelect}
               activeSymbol={symbol}
               activeMarket={market}
-              onOpenSearch={() => setSearchOpen(true)} 
+              activePrice={activePrice}
+              onOpenSearch={() => setSearchOpen(true)}
             />
           </div>
         </div>
 
-        {/* Main Chart + Notes */}
-        <main className="flex-1 flex overflow-hidden">
-          <div className="flex-1 flex flex-col min-w-0 p-3 animate-fadeInSlow">
+        <main className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div
+            className={`${activePanel === "chart" ? "flex" : "hidden"} lg:flex min-h-0 min-w-0 flex-1 flex-col p-2 sm:p-3`}
+          >
             <ChartContainer
               marketType={market}
               symbol={symbol}
               interval={interval}
+              onLivePrice={setActivePrice}
               key={`${market}-${symbol}-${interval}`}
             />
           </div>
 
-          <div className="w-[320px] bg-[#0b0f14]/90 border-l border-gray-800 shadow-lg animate-fadeIn delay-300">
+          <div
+            className={`${activePanel === "notes" ? "flex" : "hidden"} lg:flex min-h-0 w-full min-w-0 flex-1 flex-col border-l border-gray-800 bg-[#0b0f14] lg:w-72 lg:flex-none xl:w-80`}
+          >
             <NotesPanel activeSymbol={symbol} />
           </div>
         </main>

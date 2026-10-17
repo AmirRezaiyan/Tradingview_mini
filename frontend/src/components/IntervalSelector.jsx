@@ -14,13 +14,15 @@ const OPTIONS = [
 
 export default function IntervalSelector({ value, onChange }) {
   return (
-    <div className="flex items-center gap-2">
+    <div role="group" aria-label="Chart interval" className="grid w-full grid-cols-5 gap-1 sm:flex sm:flex-wrap sm:items-center">
       {OPTIONS.map((opt) => (
         <button
           key={opt.id}
+          type="button"
           onClick={() => onChange(opt.id)}
-          className={`px-2 py-1 text-xs rounded ${
-            value === opt.id ? "bg-gray-700 text-white" : "bg-transparent text-gray-400 hover:bg-gray-800"
+          aria-pressed={value === opt.id}
+          className={`min-h-10 min-w-0 rounded border px-2 py-1 text-xs ${
+            value === opt.id ? "border-sky-300 bg-[#18313d] font-semibold text-white" : "border-gray-700 bg-transparent text-gray-200 hover:bg-gray-800"
           }`}
         >
           {opt.label}

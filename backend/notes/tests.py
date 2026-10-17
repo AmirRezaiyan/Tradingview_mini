@@ -51,3 +51,9 @@ class SharedNotesAPITests(TestCase):
 		self.assertEqual(filtered.data[0]["symbol"], "BTCUSDT")
 		self.assertEqual(blank.status_code, 400)
 		self.assertEqual(too_long.status_code, 400)
+
+	def test_empty_symbol_filter_is_a_successful_array(self):
+		response = self.client.get("/api/notes/?symbol=BTCUSDT")
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data, [])

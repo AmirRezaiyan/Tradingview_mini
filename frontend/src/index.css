@@ -1,3 +1,6 @@
+@import "tailwindcss";
+@config "../tailwind.config.cjs";
+
   :root {
     font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
     line-height: 1.5;
@@ -13,17 +16,44 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  html,
+  body,
+  #root {
+    width: 100%;
+    min-width: 0;
+  }
+
   body {
     margin: 0;
-    min-width: 100vw;
-    min-height: 100vh;
+    min-height: 100dvh;
+    overflow-x: hidden;
+  }
+
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #1f2937;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #6b7280;
+    border-radius: 4px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #9ca3af;
   }
 
   #root {
-    width: 100vw;
-    height: 100vh;
+    max-width: 100%;
+    min-height: 100dvh;
+    height: 100dvh;
     margin: 0;
     padding: 0;
+    overflow-x: hidden;
   }
 
   button {
@@ -40,9 +70,28 @@
   button:hover {
     border-color: #646cff;
   }
-  button:focus,
-  button:focus-visible {
-    outline: 4px auto -webkit-focus-ring-color;
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 3px solid #7dd3fc;
+    outline-offset: 2px;
+  }
+
+  .text-gray-500 {
+    color: #9ca3af;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 
   @keyframes fadeInSlow {
@@ -72,6 +121,7 @@
 
 .indicator-panel {
   width: 100%;
+  min-width: 0;
   margin-top: 8px;
   border: 1px solid #262b33;
   border-radius: 8px;
