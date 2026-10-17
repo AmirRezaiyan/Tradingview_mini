@@ -1,3 +1,1 @@
-from django.contrib import admin
-
-# Register your models here.
+"""The market app has no admin-managed models."""

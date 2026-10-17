@@ -1,3 +1,1 @@
-from django.db import models
-
-# Create your models here.
+"""Market data is fetched from providers and is not persisted as models."""
